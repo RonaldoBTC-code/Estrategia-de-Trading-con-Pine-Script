@@ -4,6 +4,9 @@
 // ----------------------------------------------------------------------------
 // Evolución de "CB Swing Pro v11 [Asset Presets Clean Quant v6]".
 //
+// v12.1 — calibración orientada a mayor Win Rate: TP1 más cercano, mayor cierre
+// parcial en TP1, break-even con +0.1R y salida defensiva solo antes de TP1.
+//
 // TAREA 1 — Configuración de strategy() y Backtest_Config realista
 //   - overlay=true.
 //   - process_orders_on_close=true (default).
@@ -189,12 +192,12 @@ f_resolve(useCustom, customVal, presetHasOverride, presetVal, modeDefault) =>
 // Defaults consistentes con la tabla Data Models del diseño: TPs más cercanos,
 // trailing más ajustado y min_score <= swing. HTF intradía "240" (4H).
 i_htf_day       = input.string('240', 'HTF (timeframe)',        group='J. Modo Day', tooltip='Temporalidad del HTF_Filter para Day. Default 4H ("240").')
-i_tp1_r_day     = input.float (1.0,  'TP1 (múltiplo de R)',     minval=0.1, step=0.1, group='J. Modo Day')
+i_tp1_r_day     = input.float (0.7,  'TP1 (múltiplo de R)',     minval=0.1, step=0.1, group='J. Modo Day')
 i_tp2_r_day     = input.float (1.8,  'TP2 (múltiplo de R)',     minval=0.1, step=0.1, group='J. Modo Day')
 i_tp3_r_day     = input.float (3.0,  'TP3 (múltiplo de R)',     minval=0.1, step=0.1, group='J. Modo Day')
 i_trail_atr_day = input.float (1.5,  'Trailing (x ATR)',        minval=0.1, step=0.1, group='J. Modo Day', tooltip='Trailing más ajustado en Day.')
-i_tp1_pct_day   = input.float (33,   'TP1 cierre parcial (%)',  minval=0, maxval=100, step=1, group='J. Modo Day')
-i_tp2_pct_day   = input.float (33,   'TP2 cierre parcial (%)',  minval=0, maxval=100, step=1, group='J. Modo Day')
+i_tp1_pct_day   = input.float (60,   'TP1 cierre parcial (%)',  minval=0, maxval=100, step=1, group='J. Modo Day')
+i_tp2_pct_day   = input.float (25,   'TP2 cierre parcial (%)',  minval=0, maxval=100, step=1, group='J. Modo Day')
 i_min_score_day = input.int   (5,    'Min_Score',               minval=0, maxval=10, group='J. Modo Day', tooltip='Min_Score por defecto de Day (<= Swing).')
 i_delta_day     = input.int   (1,    'Score_Edge (delta)',      minval=0, maxval=10, group='J. Modo Day')
 i_adx_day       = input.int   (18,   'ADX mínimo',              minval=0, group='J. Modo Day')
@@ -214,12 +217,12 @@ i_expo_off_day  = input.float (10,   'Exposición off (%)',      minval=0, step=
 // Defaults swing previos (compatibilidad hacia atrás): TPs más amplios,
 // trailing más amplio, min_score >= day. HTF semanal "W".
 i_htf_swing       = input.string('W',  'HTF (timeframe)',         group='K. Modo Swing', tooltip='Temporalidad del HTF_Filter para Swing. Default semanal ("W").')
-i_tp1_r_swing     = input.float (1.5,  'TP1 (múltiplo de R)',     minval=0.1, step=0.1, group='K. Modo Swing')
+i_tp1_r_swing     = input.float (1.0,  'TP1 (múltiplo de R)',     minval=0.1, step=0.1, group='K. Modo Swing')
 i_tp2_r_swing     = input.float (3.0,  'TP2 (múltiplo de R)',     minval=0.1, step=0.1, group='K. Modo Swing')
 i_tp3_r_swing     = input.float (6.0,  'TP3 (múltiplo de R)',     minval=0.1, step=0.1, group='K. Modo Swing')
 i_trail_atr_swing = input.float (3.0,  'Trailing (x ATR)',        minval=0.1, step=0.1, group='K. Modo Swing', tooltip='Trailing más amplio en Swing.')
-i_tp1_pct_swing   = input.float (33,   'TP1 cierre parcial (%)',  minval=0, maxval=100, step=1, group='K. Modo Swing')
-i_tp2_pct_swing   = input.float (33,   'TP2 cierre parcial (%)',  minval=0, maxval=100, step=1, group='K. Modo Swing')
+i_tp1_pct_swing   = input.float (60,   'TP1 cierre parcial (%)',  minval=0, maxval=100, step=1, group='K. Modo Swing')
+i_tp2_pct_swing   = input.float (25,   'TP2 cierre parcial (%)',  minval=0, maxval=100, step=1, group='K. Modo Swing')
 i_min_score_swing = input.int   (6,    'Min_Score',               minval=0, maxval=10, group='K. Modo Swing', tooltip='Min_Score por defecto de Swing (>= Day).')
 i_delta_swing     = input.int   (2,    'Score_Edge (delta)',      minval=0, maxval=10, group='K. Modo Swing')
 i_adx_swing       = input.int   (22,   'ADX mínimo',              minval=0, group='K. Modo Swing')
@@ -312,7 +315,7 @@ i_cust_atr_min     = input.float (0.3, 'ATR% mínimo',               minval=0, s
 i_cust_atr_max     = input.float (6.0, 'ATR% máximo',               minval=0, step=0.1,  group='C. CUSTOM (parámetros)')
 i_cust_trail       = input.float (2.0, 'Trailing (x ATR)',          minval=0.1, step=0.1, group='C. CUSTOM (parámetros)')
 i_cust_vol_x       = input.float (1.2, 'Volumen x (media)',         minval=0, step=0.1,  group='C. CUSTOM (parámetros)')
-i_cust_tp1_r       = input.float (1.2, 'TP1 (múltiplo de R)',       minval=0.1, step=0.1, group='C. CUSTOM (parámetros)')
+i_cust_tp1_r       = input.float (0.8, 'TP1 (múltiplo de R)',       minval=0.1, step=0.1, group='C. CUSTOM (parámetros)')
 i_cust_tp2_r       = input.float (2.4, 'TP2 (múltiplo de R)',       minval=0.1, step=0.1, group='C. CUSTOM (parámetros)')
 i_cust_tp3_r       = input.float (4.5, 'TP3 (múltiplo de R)',       minval=0.1, step=0.1, group='C. CUSTOM (parámetros)')
 i_cust_rsi_long    = input.int   (50,  'RSI umbral long',           minval=0, maxval=100, group='C. CUSTOM (parámetros)')
@@ -351,7 +354,7 @@ f_ov_volx(_a, _d) =>
 
 // R-múltiples de TP por activo/modo (Day <= Swing). SOL targets más amplios.
 f_ov_tp1r(_a, _d) =>
-    _a == 'BTC' ? (_d ? 1.0 : 1.5) : _a == 'ETH' ? (_d ? 1.0 : 1.5) : _a == 'SOL' ? (_d ? 1.2 : 1.8) : _a == 'ORO' ? (_d ? 0.9 : 1.3) : na
+    _a == 'BTC' ? (_d ? 0.7 : 1.0) : _a == 'ETH' ? (_d ? 0.7 : 1.0) : _a == 'SOL' ? (_d ? 0.8 : 1.2) : _a == 'ORO' ? (_d ? 0.7 : 1.0) : na
 f_ov_tp2r(_a, _d) =>
     _a == 'BTC' ? (_d ? 1.8 : 3.0) : _a == 'ETH' ? (_d ? 1.8 : 3.0) : _a == 'SOL' ? (_d ? 2.2 : 3.5) : _a == 'ORO' ? (_d ? 1.6 : 2.6) : na
 f_ov_tp3r(_a, _d) =>
@@ -1207,13 +1210,13 @@ if in_pos
     if isLong
         sl_live := init_sl
         if be_armed
-            sl_live := math.max(sl_live, entry_price)
+            sl_live := math.max(sl_live, entry_price + 0.1 * risk_unit)
         if trail_active and not na(trail_level)
             sl_live := math.max(sl_live, trail_level)
     else if isShort
         sl_live := init_sl
         if be_armed
-            sl_live := math.min(sl_live, entry_price)
+            sl_live := math.min(sl_live, entry_price - 0.1 * risk_unit)
         if trail_active and not na(trail_level)
             sl_live := math.min(sl_live, trail_level)
 
@@ -1234,8 +1237,8 @@ if barstate.islast and tp_pct_neg
 // --- Salida defensiva: cambio de estructura + score opuesto fuerte -----------
 // Long en posición pero el precio pierde la EMA lenta y el score short es fuerte
 // y con ventaja => cerrar. Análogo (invertido) para short.
-defensive_long  = isLong  and barstate.isconfirmed and close < ema_slow and score_short >= eff_min_score and score_edge_short_ok
-defensive_short = isShort and barstate.isconfirmed and close > ema_slow and score_long  >= eff_min_score and score_edge_long_ok
+defensive_long  = isLong  and barstate.isconfirmed and not be_armed and close < ema_slow and score_short >= eff_min_score and score_edge_short_ok
+defensive_short = isShort and barstate.isconfirmed and not be_armed and close > ema_slow and score_long  >= eff_min_score and score_edge_long_ok
 
 if defensive_long
     strategy.close('L', comment='DEFENSIVE')

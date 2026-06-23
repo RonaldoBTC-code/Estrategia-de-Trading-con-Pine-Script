@@ -11,6 +11,8 @@
 //
 // v12.3 — más operaciones: stop con CLAMP (no rechaza), sin gate de volumen ni score_edge, trigger de continuación.
 //
+// v12.4 — equilibrio riesgo/beneficio: vuelve score_edge como filtro, Min_Score/ADX moderados, sin trigger de continuación; se mantiene el stop con clamp.
+//
 // TAREA 1 — Configuración de strategy() y Backtest_Config realista
 //   - overlay=true.
 //   - process_orders_on_close=true (default).
@@ -29,7 +31,7 @@
 
 strategy(
      title                   = 'CB Swing Pro v12 [Asset Presets Clean Quant v6 + Modos]',
-     shorttitle              = 'CB v12.3 Clean',
+     shorttitle              = 'CB v12.4 Clean',
      overlay                 = true,
      pyramiding              = 0,
      // Capital inicial representativo (Req. 6.5). En Pine v6 debe ser constante;
@@ -202,9 +204,9 @@ i_tp3_r_day     = input.float (3.0,  'TP3 (múltiplo de R)',     minval=0.1, ste
 i_trail_atr_day = input.float (1.5,  'Trailing (x ATR)',        minval=0.1, step=0.1, group='J. Modo Day', tooltip='Trailing más ajustado en Day.')
 i_tp1_pct_day   = input.float (60,   'TP1 cierre parcial (%)',  minval=0, maxval=100, step=1, group='J. Modo Day')
 i_tp2_pct_day   = input.float (25,   'TP2 cierre parcial (%)',  minval=0, maxval=100, step=1, group='J. Modo Day')
-i_min_score_day = input.int   (3,    'Min_Score',               minval=0, maxval=10, group='J. Modo Day', tooltip='Min_Score por defecto de Day (<= Swing).')
+i_min_score_day = input.int   (4,    'Min_Score',               minval=0, maxval=10, group='J. Modo Day', tooltip='Min_Score por defecto de Day (<= Swing).')
 i_delta_day     = input.int   (1,    'Score_Edge (delta)',      minval=0, maxval=10, group='J. Modo Day')
-i_adx_day       = input.int   (13,   'ADX mínimo',              minval=0, group='J. Modo Day')
+i_adx_day       = input.int   (15,   'ADX mínimo',              minval=0, group='J. Modo Day')
 i_rsi_long_day  = input.int   (50,   'RSI umbral long',         minval=0, maxval=100, group='J. Modo Day')
 i_rsi_short_day = input.int   (50,   'RSI umbral short',        minval=0, maxval=100, group='J. Modo Day')
 i_vol_x_day     = input.float (1.1,  'Volumen x (media)',       minval=0, step=0.1, group='J. Modo Day')
@@ -212,7 +214,7 @@ i_atr_min_day   = input.float (0.1,  'ATR% mínimo',             minval=0, step=
 i_atr_max_day   = input.float (3.0,  'ATR% máximo',             minval=0, step=0.1, group='J. Modo Day')
 i_sess_start_day= input.int   (13,   'Sesión inicio (UTC h)',   minval=0, maxval=24, group='J. Modo Day')
 i_sess_end_day  = input.int   (21,   'Sesión fin (UTC h)',      minval=0, maxval=24, group='J. Modo Day')
-i_cooldown_day  = input.int   (2,    'Cooldown (barras)',       minval=0, group='J. Modo Day', tooltip='Cooldown mayor en Day para evitar sobre-operar.')
+i_cooldown_day  = input.int   (3,    'Cooldown (barras)',       minval=0, group='J. Modo Day', tooltip='Cooldown mayor en Day para evitar sobre-operar.')
 i_risk_pct_day  = input.float (0.5,  'Riesgo por operación (%)',minval=0, step=0.1, group='J. Modo Day')
 i_expo_prime_day= input.float (20,   'Exposición prime (%)',    minval=0, step=1, group='J. Modo Day')
 i_expo_off_day  = input.float (10,   'Exposición off (%)',      minval=0, step=1, group='J. Modo Day')
@@ -227,9 +229,9 @@ i_tp3_r_swing     = input.float (6.0,  'TP3 (múltiplo de R)',     minval=0.1, s
 i_trail_atr_swing = input.float (3.0,  'Trailing (x ATR)',        minval=0.1, step=0.1, group='K. Modo Swing', tooltip='Trailing más amplio en Swing.')
 i_tp1_pct_swing   = input.float (60,   'TP1 cierre parcial (%)',  minval=0, maxval=100, step=1, group='K. Modo Swing')
 i_tp2_pct_swing   = input.float (25,   'TP2 cierre parcial (%)',  minval=0, maxval=100, step=1, group='K. Modo Swing')
-i_min_score_swing = input.int   (4,    'Min_Score',               minval=0, maxval=10, group='K. Modo Swing', tooltip='Min_Score por defecto de Swing (>= Day).')
+i_min_score_swing = input.int   (5,    'Min_Score',               minval=0, maxval=10, group='K. Modo Swing', tooltip='Min_Score por defecto de Swing (>= Day).')
 i_delta_swing     = input.int   (2,    'Score_Edge (delta)',      minval=0, maxval=10, group='K. Modo Swing')
-i_adx_swing       = input.int   (17,   'ADX mínimo',              minval=0, group='K. Modo Swing')
+i_adx_swing       = input.int   (18,   'ADX mínimo',              minval=0, group='K. Modo Swing')
 i_rsi_long_swing  = input.int   (52,   'RSI umbral long',         minval=0, maxval=100, group='K. Modo Swing')
 i_rsi_short_swing = input.int   (48,   'RSI umbral short',        minval=0, maxval=100, group='K. Modo Swing')
 i_vol_x_swing     = input.float (1.3,  'Volumen x (media)',       minval=0, step=0.1, group='K. Modo Swing')
@@ -237,7 +239,7 @@ i_atr_min_swing   = input.float (0.5,  'ATR% mínimo',             minval=0, ste
 i_atr_max_swing   = input.float (8.0,  'ATR% máximo',             minval=0, step=0.1, group='K. Modo Swing')
 i_sess_start_swing= input.int   (0,    'Sesión inicio (UTC h)',   minval=0, maxval=24, group='K. Modo Swing')
 i_sess_end_swing  = input.int   (24,   'Sesión fin (UTC h)',      minval=0, maxval=24, group='K. Modo Swing')
-i_cooldown_swing  = input.int   (2,    'Cooldown (barras)',       minval=0, group='K. Modo Swing')
+i_cooldown_swing  = input.int   (3,    'Cooldown (barras)',       minval=0, group='K. Modo Swing')
 i_risk_pct_swing  = input.float (1.0,  'Riesgo por operación (%)',minval=0, step=0.1, group='K. Modo Swing')
 i_expo_prime_swing= input.float (30,   'Exposición prime (%)',    minval=0, step=1, group='K. Modo Swing')
 i_expo_off_swing  = input.float (15,   'Exposición off (%)',      minval=0, step=1, group='K. Modo Swing')
@@ -334,11 +336,11 @@ i_cust_risk_pct    = input.float (0.75,'Riesgo por operación (%)',  minval=0, s
 
 // ADX mínimo: SOL exige más fuerza de tendencia; ORO algo menos.
 f_ov_adx(_a, _d) =>
-    _a == 'BTC' ? (_d ? 13 : 17) : _a == 'ETH' ? (_d ? 13 : 17) : _a == 'SOL' ? (_d ? 16 : 20) : _a == 'ORO' ? (_d ? 12 : 15) : na
+    _a == 'BTC' ? (_d ? 15 : 18) : _a == 'ETH' ? (_d ? 15 : 18) : _a == 'SOL' ? (_d ? 18 : 22) : _a == 'ORO' ? (_d ? 13 : 16) : na
 
 // Min_Score base por activo/modo (Day <= Swing). El perfil se aplica después.
 f_ov_minscore(_a, _d) =>
-    _a == 'BTC' ? (_d ? 3 : 4) : _a == 'ETH' ? (_d ? 3 : 4) : _a == 'SOL' ? (_d ? 4 : 5) : _a == 'ORO' ? (_d ? 3 : 4) : na
+    _a == 'BTC' ? (_d ? 4 : 5) : _a == 'ETH' ? (_d ? 4 : 5) : _a == 'SOL' ? (_d ? 5 : 6) : _a == 'ORO' ? (_d ? 4 : 5) : na
 
 // Banda ATR% mínima: SOL más amplia (más volátil), ORO más estrecha.
 f_ov_atrmin(_a, _d) =>
@@ -769,8 +771,8 @@ mom_candle_long  = close > open
 mom_candle_short = close < open
 
 // --- Trigger por lado: cruce con la EMA rápida o pullback + momentum ----------
-trigger_long  = ta.crossover(close, ema_fast)  or (pullback_long  and mom_candle_long)  or (close > ema_fast and close > close[1])
-trigger_short = ta.crossunder(close, ema_fast) or (pullback_short and mom_candle_short) or (close < ema_fast and close < close[1])
+trigger_long  = ta.crossover(close, ema_fast)  or (pullback_long  and mom_candle_long)
+trigger_short = ta.crossunder(close, ema_fast) or (pullback_short and mom_candle_short)
 
 // --- Macro-tendencia por lado (ema_50 vs ema_200) ----------------------------
 macro_long_ok  = ema_50 > ema_200
@@ -1083,10 +1085,10 @@ flat       = strategy.position_size == 0
 entry_base = no_repaint_gate and flat and cooldown_ok
 
 // --- Gating completo de ENTRADA LONG -----------------------------------------
-entry_long = entry_base and eff_allow_long and session_ok and regime_trend and trend_long and trigger_long and htf_ok_long and atr_ok and distance_ok and (score_long >= eff_min_score) and stop_quality_long and qty_long_ok
+entry_long = entry_base and eff_allow_long and session_ok and regime_trend and trend_long and trigger_long and htf_ok_long and atr_ok and distance_ok and (score_long >= eff_min_score) and score_edge_long_ok and stop_quality_long and qty_long_ok
 
 // --- Gating completo de ENTRADA SHORT ----------------------------------------
-entry_short = entry_base and eff_allow_short and session_ok and regime_trend and trend_short and trigger_short and htf_ok_short and atr_ok and distance_ok and (score_short >= eff_min_score) and stop_quality_short and qty_short_ok
+entry_short = entry_base and eff_allow_short and session_ok and regime_trend and trend_short and trigger_short and htf_ok_short and atr_ok and distance_ok and (score_short >= eff_min_score) and score_edge_short_ok and stop_quality_short and qty_short_ok
 
 // Guarda de exclusión mutua: si por algún empate de score ambos lados quedaran
 // habilitados en la misma barra (no debería ocurrir por score_edge), se prioriza

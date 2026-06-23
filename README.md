@@ -103,3 +103,15 @@ Distribuido bajo la licencia **MIT**. Consulta el archivo [`LICENSE`](./LICENSE)
 ---
 
 <p align="center"><sub>Hecho con 📈 y Pine Script · CB Swing Pro v12</sub></p>
+
+
+---
+
+## 🆕 Versión v13.1 (Quant Pullback)
+
+- **Reescritura completa:** entradas por *pullback-continuación* (no por cruce tardío), filtro anti-rango por compresión de EMAs, macro por pendiente de EMA200 y HTF sin repintado.
+- **Gestión de salida:** TP1 1.0R cerrando 40%, TP2 30%, *runner* 30% a TP3 con *trailing* Chandelier, *break-even* +0.2R tras TP1 (mejora el Profit Factor).
+- **Presets por activo:** BTC/ETH (tendencia macro + pullback), SOL (más estricto, menor tamaño, *cooldown* mayor), ORO (LONG preferente, shorts muy restringidos, volumen ignorado).
+- **Archivo:** [`cb-swing-pro-v13.pine`](./cb-swing-pro-v13.pine). `shorttitle` en TradingView: **"CB v13.1 Quant"**.
+
+> ⚠️ **Advertencia:** Pine Script no lee CSV; los históricos se usaron para calibración *offline*. **PF > 2.0 es un objetivo de calibración, NO una garantía.** Win rate realista 55-70%. Valida en el *Strategy Tester* de cada activo.

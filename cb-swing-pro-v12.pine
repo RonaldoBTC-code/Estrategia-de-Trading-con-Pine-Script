@@ -9,6 +9,8 @@
 //
 // v12.2 — más operaciones: filtro macro ya no es obligatorio, ADX/Min_Score y cooldown más bajos.
 //
+// v12.3 — más operaciones: stop con CLAMP (no rechaza), sin gate de volumen ni score_edge, trigger de continuación.
+//
 // TAREA 1 — Configuración de strategy() y Backtest_Config realista
 //   - overlay=true.
 //   - process_orders_on_close=true (default).
@@ -27,7 +29,7 @@
 
 strategy(
      title                   = 'CB Swing Pro v12 [Asset Presets Clean Quant v6 + Modos]',
-     shorttitle              = 'CB v12 Clean',
+     shorttitle              = 'CB v12.3 Clean',
      overlay                 = true,
      pyramiding              = 0,
      // Capital inicial representativo (Req. 6.5). En Pine v6 debe ser constante;
@@ -767,8 +769,8 @@ mom_candle_long  = close > open
 mom_candle_short = close < open
 
 // --- Trigger por lado: cruce con la EMA rápida o pullback + momentum ----------
-trigger_long  = ta.crossover(close, ema_fast)  or (pullback_long  and mom_candle_long)
-trigger_short = ta.crossunder(close, ema_fast) or (pullback_short and mom_candle_short)
+trigger_long  = ta.crossover(close, ema_fast)  or (pullback_long  and mom_candle_long)  or (close > ema_fast and close > close[1])
+trigger_short = ta.crossunder(close, ema_fast) or (pullback_short and mom_candle_short) or (close < ema_fast and close < close[1])
 
 // --- Macro-tendencia por lado (ema_50 vs ema_200) ----------------------------
 macro_long_ok  = ema_50 > ema_200
@@ -932,26 +934,33 @@ sl_atr_short = close + atr_val * i_sl_atr
 sl_long_raw  = math.min(sl_struct_long,  sl_atr_long)
 sl_short_raw = math.max(sl_struct_short, sl_atr_short)
 
-// --- Validación de lado: el SL debe quedar del lado correcto del precio ------
-// Si el stop no quedó del lado correcto (datos degenerados/warm-up), se invalida
-// (na) y la entrada de ese lado quedará bloqueada por qty_ok (Property 19 / 5.5).
-sl_long_side_ok  = not na(sl_long_raw)  and sl_long_raw  < close
-sl_short_side_ok = not na(sl_short_raw) and sl_short_raw > close
-sl_long  = sl_long_side_ok  ? sl_long_raw  : na
-sl_short = sl_short_side_ok ? sl_short_raw : na
+// --- Distancia objetivo del stop (en precio) ---------------------------------
+raw_dist_long  = na(sl_long_raw)  ? na : close - sl_long_raw
+raw_dist_short = na(sl_short_raw) ? na : sl_short_raw - close
 
-// --- Distancia del stop (1R) y calidad por banda de ATR ----------------------
-// stop_dist = 0 cuando el SL es inválido => bloquea la entrada (criterio 5.5).
+// --- Clamp dentro de la banda [min, max] * ATR (NO se rechaza la entrada) -----
+// En vez de bloquear la entrada cuando el stop queda fuera de banda, se AJUSTA
+// (clamp) la distancia al límite permitido. Así un stop estructural muy lejano
+// ya no impide operar; solo se acerca al máximo de la banda. Esto aumenta mucho
+// el número de operaciones válidas (era el principal freno de frecuencia).
+min_stop_d = i_min_stop_atr * atr_val
+max_stop_d = i_max_stop_atr * atr_val
+clamp_dist_long  = (na(raw_dist_long)  or na(atr_val) or atr_val <= 0) ? na : math.max(min_stop_d, math.min(raw_dist_long,  max_stop_d))
+clamp_dist_short = (na(raw_dist_short) or na(atr_val) or atr_val <= 0) ? na : math.max(min_stop_d, math.min(raw_dist_short, max_stop_d))
+
+sl_long  = na(clamp_dist_long)  ? na : close - clamp_dist_long
+sl_short = na(clamp_dist_short) ? na : close + clamp_dist_short
+
+// --- Distancia del stop (1R) -------------------------------------------------
 stop_dist_long  = na(sl_long)  ? 0.0 : close - sl_long
 stop_dist_short = na(sl_short) ? 0.0 : sl_short - close
 
-// stop_atr = stop_dist / ATR (f_safe_div protege ante atr_val == 0/na en warm-up).
 stop_atr_long  = f_safe_div(stop_dist_long,  atr_val)
 stop_atr_short = f_safe_div(stop_dist_short, atr_val)
 
-// stop_quality: el stop está dentro de la banda [min, max] en múltiplos de ATR.
-stop_quality_long  = stop_dist_long  > 0 and stop_atr_long  >= i_min_stop_atr and stop_atr_long  <= i_max_stop_atr
-stop_quality_short = stop_dist_short > 0 and stop_atr_short >= i_min_stop_atr and stop_atr_short <= i_max_stop_atr
+// stop_quality: tras el clamp basta con que la distancia sea > 0 (lado correcto).
+stop_quality_long  = stop_dist_long  > 0
+stop_quality_short = stop_dist_short > 0
 
 // --- Sizing por riesgo y caps de exposición ----------------------------------
 // Equity actual de la estrategia (base del sizing por % de riesgo).
@@ -1074,10 +1083,10 @@ flat       = strategy.position_size == 0
 entry_base = no_repaint_gate and flat and cooldown_ok
 
 // --- Gating completo de ENTRADA LONG -----------------------------------------
-entry_long = entry_base and eff_allow_long and session_ok and regime_trend and trend_long and trigger_long and htf_ok_long and atr_ok and vol_ok and distance_ok and (score_long >= eff_min_score) and score_edge_long_ok and stop_quality_long and qty_long_ok
+entry_long = entry_base and eff_allow_long and session_ok and regime_trend and trend_long and trigger_long and htf_ok_long and atr_ok and distance_ok and (score_long >= eff_min_score) and stop_quality_long and qty_long_ok
 
 // --- Gating completo de ENTRADA SHORT ----------------------------------------
-entry_short = entry_base and eff_allow_short and session_ok and regime_trend and trend_short and trigger_short and htf_ok_short and atr_ok and vol_ok and distance_ok and (score_short >= eff_min_score) and score_edge_short_ok and stop_quality_short and qty_short_ok
+entry_short = entry_base and eff_allow_short and session_ok and regime_trend and trend_short and trigger_short and htf_ok_short and atr_ok and distance_ok and (score_short >= eff_min_score) and stop_quality_short and qty_short_ok
 
 // Guarda de exclusión mutua: si por algún empate de score ambos lados quedaran
 // habilitados en la misma barra (no debería ocurrir por score_edge), se prioriza

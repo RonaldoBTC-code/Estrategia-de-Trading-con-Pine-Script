@@ -6,18 +6,16 @@
 //
 // TAREA 1 — Configuración de strategy() y Backtest_Config realista
 //   - overlay=true.
-//   - process_orders_on_close controlado por un input bool (default true).
-//   - Comisión por operación configurable (default 0.08%), cableada a
+//   - process_orders_on_close=true (default).
+//   - Comisión por operación (default 0.08%), cableada a
 //     commission_value/commission_type.
-//   - Slippage configurable, cableado a slippage.
-//   - Capital inicial representativo y configurable, cableado a initial_capital.
+//   - Slippage cableado a slippage.
+//   - Capital inicial representativo, cableado a initial_capital.
 //   - max_bars_back=800 para el warm-up de cálculos e HTF.
 //
-// Nota Pine v6: la llamada strategy() debe ser la primera sentencia del script,
-// por lo que los inputs de configuración del backtest se declaran en línea como
-// argumentos de strategy(). Pasar input.bool/input.float/input.int en la
-// cabecera de strategy() es válido en Pine v6 y crea controles configurables en
-// los ajustes de la estrategia.
+// Nota Pine v6: estos parámetros de strategy() deben ser constantes. El capital
+// inicial, la comisión y el slippage también pueden ajustarse desde la pestaña
+// 'Propiedades' del Strategy Tester de TradingView.
 //
 // Requisitos cubiertos: 6.1, 6.3, 6.4, 6.5
 // ============================================================================
@@ -27,25 +25,23 @@ strategy(
      shorttitle              = 'CB v12 Clean',
      overlay                 = true,
      pyramiding              = 0,
-     // Capital inicial representativo y configurable (Req. 6.5).
-     // Un capital muy pequeño (p. ej. 50 USDT) distorsiona el sizing por % de
-     // equity; por eso el default es representativo para que el dimensionamiento
-     // por riesgo sea significativo en el backtest.
-     initial_capital         = input.float(10000, 'Capital inicial (USDT)', minval=1, step=100, group='I. Backtest', tooltip='Capital inicial representativo para que el sizing por % de equity sea significativo.'),
+     // Capital inicial representativo (Req. 6.5). En Pine v6 debe ser constante;
+     // ajustable también desde la pestaña 'Propiedades' del Strategy Tester.
+     initial_capital         = 10000,
      default_qty_type        = strategy.fixed,
      default_qty_value       = 1,
      currency                = currency.USDT,
-     // Comisión por operación configurable, default 0.08% (Req. 6.3).
+     // Comisión por operación, default 0.08% (Req. 6.3). Debe ser constante.
      commission_type         = strategy.commission.percent,
-     commission_value        = input.float(0.08, 'Comisión por operación (%)', minval=0, step=0.01, group='I. Backtest', tooltip='Comisión por operación en porcentaje. Default 0.08%.'),
-     // Slippage configurable en ticks (Req. 6.4).
-     slippage                = input.int(2, 'Slippage (ticks)', minval=0, group='I. Backtest', tooltip='Slippage simulado en ticks para aproximar la ejecución real.'),
+     commission_value        = 0.08,
+     // Slippage en ticks (Req. 6.4). Debe ser constante.
+     slippage                = 2,
      max_bars_back           = 800,
      margin_long             = 5,
      margin_short            = 5,
-     // Procesar órdenes al cierre de la barra, configurable y activado por
-     // defecto (Req. 6.1). Evaluar al cierre confirmado reduce el repintado.
-     process_orders_on_close = input.bool(true, 'Procesar órdenes al cierre de la barra', group='I. Backtest', tooltip='Si está activo, las órdenes se procesan al cierre de la barra (más realista y sin repintado intrabar).'),
+     // Procesar órdenes al cierre de la barra, activado por defecto (Req. 6.1).
+     // Evaluar al cierre confirmado reduce el repintado. Debe ser constante.
+     process_orders_on_close = true,
      calc_on_order_fills     = false)
 
 // ============================================================================
@@ -681,7 +677,7 @@ p14_ok = p14_relation and p14_inside and p14_outside and p14_full_day and p14_wr
 // Si (bar_index - last_entry_bar) < eff_cooldown, no se permite nueva entrada.
 // Se valida la lógica pura f_cooldown_ok en los tres caminos relevantes.
 // **Validates: Requirements 7.4**
-p15_no_prev    = f_cooldown_ok(na, 100, 5) == true     // sin entrada previa => permite
+p15_no_prev    = f_cooldown_ok(int(na), 100, 5) == true     // sin entrada previa => permite
 p15_blocks     = f_cooldown_ok(100, 103, 5) == false   // 3 < 5 => bloquea
 p15_allows     = f_cooldown_ok(100, 105, 5) == true    // 5 >= 5 => permite
 p15_ok = p15_no_prev and p15_blocks and p15_allows

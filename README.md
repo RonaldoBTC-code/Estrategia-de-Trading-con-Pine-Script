@@ -9,6 +9,8 @@
 
 CB Swing Pro v12 es una estrategia escrita en **Pine Script v6** para el *Strategy Tester* de **TradingView**. Combina un filtro de tendencia de temporalidad superior (HTF), un análisis de régimen y sesión, un sistema de *scoring* de 0 a 10 y una gestión de salidas por etapas, todo ello calibrado mediante presets por activo y perfiles de agresividad. Su objetivo es ofrecer un marco de decisión transparente, reproducible y fácil de adaptar a distintos estilos operativos.
 
+> 📘 **¿Es tu primera vez?** Lee la **[Guía fácil para principiantes (explicada para todos)](GUIA.md)**.
+
 ---
 
 ## 📑 Tabla de contenidos

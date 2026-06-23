@@ -1,0 +1,262 @@
+//@version=6
+// ============================================================================
+// CB Swing Pro v13.1 [Quant Pullback-Continuation] — v6  (VERSION FINAL)
+// Entradas por pullback (no por cruce tardio), filtro anti-rango, macro por
+// pendiente de EMA200, HTF sin repintado, presets por activo.
+// Mejora v13.1: dejar correr ganadores -> TP1 1.0R cierra 40%, runner 30% a TP3,
+//               break-even +0.2R tras TP1 (sube Profit Factor).
+// Activos: BTC / ETH / SOL / ORO (+ CUSTOM). Modos: Auto / Swing / Day.
+// NOTA: Pine no lee CSV; los historicos se usaron para calibracion offline.
+// ============================================================================
+strategy(
+     title                   = 'CB Swing Pro v13.1 [Quant Pullback]',
+     shorttitle              = 'CB v13.1 Quant',
+     overlay                 = true,
+     pyramiding              = 0,
+     initial_capital         = 10000,
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     currency                = currency.USD,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.08,
+     slippage                = 2,
+     max_bars_back           = 1000,
+     process_orders_on_close = true,
+     calc_on_order_fills     = false)
+
+f_safe_div(_n, _d) => na(_d) or _d == 0 ? 0.0 : _n / _d
+
+// --- Modo ---
+i_mode = input.string('Auto', 'Modo', options=['Auto','Swing','Day'], group='1. Modo', tooltip='Auto: <=60min => Day, >60min => Swing')
+tf_sec  = timeframe.in_seconds(timeframe.period)
+isDay   = i_mode == 'Day' or (i_mode == 'Auto' and tf_sec <= 3600)
+isSwing = not isDay
+modeStr = isDay ? 'Day' : 'Swing'
+
+// --- Preset / Perfil / Direccion ---
+i_asset   = input.string('BTC','Activo', options=['BTC','ETH','SOL','ORO','CUSTOM'], group='2. Preset')
+i_profile = input.string('BALANCEADO','Perfil', options=['CONSERVADOR','BALANCEADO','AGRESIVO'], group='2. Preset')
+i_dir     = input.string('PRESET','Direccion', options=['PRESET','LONG','SHORT','AMBOS'], group='2. Preset')
+
+i_c_htf      = input.string('D','HTF', group='3. CUSTOM')
+i_c_adx      = input.int(18,'ADX min', group='3. CUSTOM')
+i_c_minscore = input.int(5,'Min Score', minval=0, maxval=10, group='3. CUSTOM')
+i_c_atrmin   = input.float(0.3,'ATR% min', step=0.05, group='3. CUSTOM')
+i_c_atrmax   = input.float(6.0,'ATR% max', step=0.1, group='3. CUSTOM')
+i_c_riskpct  = input.float(0.75,'Riesgo %', step=0.1, group='3. CUSTOM')
+
+// --- Presets por activo ---
+f_adx(_a,_d)      => _a=='SOL'?(_d?20:24): _a=='ORO'?(_d?14:17): _a=='ETH'?(_d?16:19):(_d?15:18)
+f_minscore(_a,_d) => _a=='SOL'?(_d?6:7): _a=='ORO'?(_d?5:6):(_d?5:6)
+f_atrmin(_a,_d)   => _a=='SOL'?(_d?0.25:0.90): _a=='ORO'?(_d?0.05:0.25): _a=='ETH'?(_d?0.18:0.65):(_d?0.12:0.50)
+f_atrmax(_a,_d)   => _a=='SOL'?(_d?6.0:14.0): _a=='ORO'?(_d?1.6:4.0): _a=='ETH'?(_d?4.0:10.0):(_d?3.5:9.0)
+f_trail(_a,_d)    => _a=='SOL'?(_d?2.4:4.2): _a=='ORO'?(_d?1.4:2.6): _a=='ETH'?(_d?1.8:3.4):(_d?1.7:3.2)
+f_tp1(_a,_d)      => _a=='SOL'?(_d?1.1:1.4): _a=='ORO'?(_d?1.0:1.2):(_d?1.0:1.2)
+f_tp2(_a,_d)      => _a=='SOL'?(_d?2.4:3.8): _a=='ORO'?(_d?1.9:3.0):(_d?2.1:3.4)
+f_tp3(_a,_d)      => _a=='SOL'?(_d?4.5:8.0): _a=='ORO'?(_d?3.2:5.5):(_d?3.6:6.5)
+f_cooldown(_a,_d) => _a=='SOL'?(_d?6:5): _a=='ORO'?(_d?3:2):(_d?4:3)
+f_risk(_a)        => _a=='SOL'?0.5: _a=='ORO'?0.8: _a=='ETH'?0.8:1.0
+f_volw(_a)        => _a=='ORO'?0.0: 1.0
+f_dir(_a)         => _a=='ORO'?'LONG':'AMBOS'
+
+isCustom = i_asset == 'CUSTOM'
+eff_htf   = isCustom ? i_c_htf : (isSwing ? 'D' : '240')
+eff_adx   = isCustom ? i_c_adx : f_adx(i_asset, isDay)
+prof_adj  = i_profile=='CONSERVADOR'?1 : i_profile=='AGRESIVO'?-1 : 0
+eff_minsc = isCustom ? i_c_minscore : f_minscore(i_asset, isDay)
+eff_minsc := int(math.max(0, math.min(10, eff_minsc + prof_adj)))
+eff_atrmn = isCustom ? i_c_atrmin : f_atrmin(i_asset, isDay)
+eff_atrmx = isCustom ? i_c_atrmax : f_atrmax(i_asset, isDay)
+eff_trail = f_trail(i_asset, isDay)
+eff_tp1   = f_tp1(i_asset, isDay)
+eff_tp2   = f_tp2(i_asset, isDay)
+eff_tp3   = f_tp3(i_asset, isDay)
+eff_cd    = f_cooldown(i_asset, isDay)
+prof_rmlt = i_profile=='CONSERVADOR'?0.75 : i_profile=='AGRESIVO'?1.5 : 1.0
+eff_risk  = (isCustom ? i_c_riskpct : f_risk(i_asset)) * prof_rmlt
+eff_volw  = isCustom ? 1.0 : f_volw(i_asset)
+eff_dir = i_dir=='PRESET' ? f_dir(i_asset) : i_dir
+allow_long  = eff_dir=='LONG'  or eff_dir=='AMBOS'
+allow_short = eff_dir=='SHORT' or eff_dir=='AMBOS'
+oro_short_strict = i_asset=='ORO'
+
+// --- Indicadores ---
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+atr    = ta.atr(14)
+atrpct = f_safe_div(atr, close) * 100.0
+[macdL, macdS, macdH] = ta.macd(close, 12, 26, 9)
+rsi    = ta.rsi(close, 14)
+[dip, dim, adx] = ta.dmi(14, 14)
+volsma = ta.sma(volume, 20)
+
+// --- HTF sin repintado ---
+ema50_src = ta.ema(close, 50)
+htfClose = request.security(syminfo.tickerid, eff_htf, close[1],     lookahead=barmerge.lookahead_off)
+htfEma   = request.security(syminfo.tickerid, eff_htf, ema50_src[1], lookahead=barmerge.lookahead_off)
+htf_na   = na(htfClose) or na(htfEma)
+htf_bull = not htf_na and htfClose > htfEma
+htf_bear = not htf_na and htfClose < htfEma
+htf_ok_long  = not htf_bear
+htf_ok_short = not htf_bull
+
+// --- Filtro anti-rango ---
+i_compress_k = input.float(0.5, 'Anti-rango: separacion min EMAs (xATR)', step=0.1, group='4. Regimen')
+ema_gap_atr  = f_safe_div(math.abs(ema20 - ema50), atr)
+not_range    = ema_gap_atr >= i_compress_k
+regime_trend = adx >= eff_adx
+atr_ok       = not na(atrpct) and atrpct >= eff_atrmn and atrpct <= eff_atrmx
+regime_ok    = regime_trend and not_range and atr_ok
+
+// --- Macro por pendiente EMA200 ---
+ema200_up   = ema200 > ema200[10]
+ema200_down = ema200 < ema200[10]
+macro_long  = close > ema200 and ema200_up
+macro_short = close < ema200 and ema200_down
+
+// --- Entrada pullback-continuacion ---
+i_pb_len = input.int(6, 'Ventana de pullback (barras)', minval=2, group='5. Entrada')
+trend_long  = close > ema50 and ema20 > ema50 and dip > dim
+trend_short = close < ema50 and ema20 < ema50 and dim > dip
+pulled_long  = ta.lowest(low, i_pb_len)  <= ema20
+pulled_short = ta.highest(high, i_pb_len) >= ema20
+turn_long  = rsi > rsi[1] and macdH > macdH[1]
+turn_short = rsi < rsi[1] and macdH < macdH[1]
+break_long  = close > high[1]
+break_short = close < low[1]
+trig_long  = pulled_long  and turn_long  and break_long
+trig_short = pulled_short and turn_short and break_short
+
+// --- Score 0-10 ---
+vol_ok = na(volsma) ? true : volume >= volsma * 1.2
+sc_long = (trend_long?2:0)+(macro_long?2:0)+(htf_bull?2:(htf_ok_long?1:0))+(macdL>macdS?1:0)+(rsi>=50?1:0)+(vol_ok?int(eff_volw):0)+(trig_long?1:0)
+sc_short= (trend_short?2:0)+(macro_short?2:0)+(htf_bear?2:(htf_ok_short?1:0))+(macdL<macdS?1:0)+(rsi<=50?1:0)+(vol_ok?int(eff_volw):0)+(trig_short?1:0)
+score_long  = math.min(10, sc_long)
+score_short = math.min(10, sc_short)
+
+// --- Sesion + cooldown ---
+i_block_sess = input.bool(false,'Bloquear fuera de sesion (Day)', group='6. Sesion')
+i_s_start = input.int(13,'Inicio UTC', minval=0, maxval=24, group='6. Sesion')
+i_s_end   = input.int(21,'Fin UTC',    minval=0, maxval=24, group='6. Sesion')
+hUTC = hour(time,'UTC')
+in_sess = (i_s_start==i_s_end) ? true : i_s_start<i_s_end ? (hUTC>=i_s_start and hUTC<i_s_end) : (hUTC>=i_s_start or hUTC<i_s_end)
+session_ok = (not i_block_sess) or (not isDay) or in_sess
+var int last_entry = na
+cooldown_ok = na(last_entry) or (bar_index - last_entry) >= eff_cd
+
+// --- Risk manager ---
+i_swing_lb   = input.int(10, 'Lookback stop estructural', minval=2, group='7. Riesgo')
+i_sl_atr     = input.float(1.5,'Stop ATR (x)', step=0.1, group='7. Riesgo')
+i_min_sl_atr = input.float(0.6,'Stop min (xATR)', step=0.1, group='7. Riesgo')
+i_max_sl_atr = input.float(4.0,'Stop max (xATR)', step=0.1, group='7. Riesgo')
+i_lev        = input.float(1.0,'Apalancamiento', minval=1, step=1, group='7. Riesgo')
+i_expo       = input.float(25,'Exposicion max (%)', step=1, group='7. Riesgo')
+struct_long  = ta.lowest(low,  i_swing_lb) - 0.20*atr
+struct_short = ta.highest(high, i_swing_lb) + 0.20*atr
+sl_long_raw  = math.min(struct_long, close - atr*i_sl_atr)
+sl_short_raw = math.max(struct_short, close + atr*i_sl_atr)
+dist_long  = math.max(atr*i_min_sl_atr, math.min(atr*i_max_sl_atr, close - sl_long_raw))
+dist_short = math.max(atr*i_min_sl_atr, math.min(atr*i_max_sl_atr, sl_short_raw - close))
+equity = strategy.equity
+f_qty(_dist) =>
+    cash = equity * eff_risk / 100.0
+    qr   = f_safe_div(cash * i_lev, _dist)
+    cap  = f_safe_div(equity * i_expo/100.0 * i_lev, close)
+    math.max(0.0, math.min(qr, cap))
+qty_long  = f_qty(dist_long)
+qty_short = f_qty(dist_short)
+
+// --- Gating ---
+base_ok = barstate.isconfirmed and regime_ok and session_ok and cooldown_ok and strategy.position_size == 0
+short_score_req = oro_short_strict ? eff_minsc + 2 : eff_minsc
+enter_long  = base_ok and allow_long  and trend_long  and macro_long  and htf_ok_long  and trig_long  and score_long  >= eff_minsc       and dist_long  > 0 and qty_long  > 0
+enter_short = base_ok and allow_short and trend_short and macro_short and htf_ok_short and trig_short and score_short >= short_score_req and dist_short > 0 and qty_short > 0
+if enter_long
+    strategy.entry('L', strategy.long, qty=qty_long)
+    last_entry := bar_index
+if enter_short
+    strategy.entry('S', strategy.short, qty=qty_short)
+    last_entry := bar_index
+
+// --- Exit manager (v13.1: deja correr ganadores) ---
+var float entry_px=na
+var float risk_unit=na
+var int entry_dir=0
+var bool tp1_done=false
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    entry_px  := strategy.position_avg_price
+    entry_dir := strategy.position_size > 0 ? 1 : -1
+    risk_unit := strategy.position_size > 0 ? dist_long : dist_short
+    tp1_done  := false
+inLong  = strategy.position_size > 0
+inShort = strategy.position_size < 0
+tp1_px = entry_dir==1 ? entry_px + eff_tp1*risk_unit : entry_px - eff_tp1*risk_unit
+tp2_px = entry_dir==1 ? entry_px + eff_tp2*risk_unit : entry_px - eff_tp2*risk_unit
+tp3_px = entry_dir==1 ? entry_px + eff_tp3*risk_unit : entry_px - eff_tp3*risk_unit
+chand_long  = ta.highest(high, 22) - atr*eff_trail
+chand_short = ta.lowest(low, 22)  + atr*eff_trail
+be_long  = entry_px + 0.2*risk_unit
+be_short = entry_px - 0.2*risk_unit
+stop_long  = tp1_done ? math.max(be_long,  chand_long)  : (entry_px - risk_unit)
+stop_short = tp1_done ? math.min(be_short, chand_short) : (entry_px + risk_unit)
+def_exit_long  = inLong  and not tp1_done and (close < ema20 and macdH < macdH[1] and rsi < rsi[1])
+def_exit_short = inShort and not tp1_done and (close > ema20 and macdH > macdH[1] and rsi > rsi[1])
+if inLong
+    strategy.exit('TP1','L', qty_percent=40, limit=tp1_px, stop=stop_long)
+    strategy.exit('TP2','L', qty_percent=30, limit=tp2_px, stop=stop_long)
+    strategy.exit('TP3','L',                  limit=tp3_px, stop=stop_long)
+    if def_exit_long
+        strategy.close('L', comment='DEF')
+if inShort
+    strategy.exit('TP1','S', qty_percent=40, limit=tp1_px, stop=stop_short)
+    strategy.exit('TP2','S', qty_percent=30, limit=tp2_px, stop=stop_short)
+    strategy.exit('TP3','S',                  limit=tp3_px, stop=stop_short)
+    if def_exit_short
+        strategy.close('S', comment='DEF')
+if inLong  and high >= tp1_px
+    tp1_done := true
+if inShort and low  <= tp1_px
+    tp1_done := true
+if strategy.position_size == 0
+    entry_dir := 0
+    tp1_done  := false
+
+// --- Visual limpio ---
+i_show_levels = input.bool(true,'Mostrar SL/TP en posicion', group='8. Visual')
+i_show_bg     = input.bool(true,'Fondo de regimen', group='8. Visual')
+var line lSL=na
+var line lT1=na
+var line lT2=na
+var line lT3=na
+f_del() => line.delete(lSL), line.delete(lT1), line.delete(lT2), line.delete(lT3)
+if i_show_levels and strategy.position_size != 0
+    f_del()
+    sl_now = entry_dir==1 ? stop_long : stop_short
+    lSL := line.new(bar_index, sl_now, bar_index+1, sl_now, color=color.red,   width=2, extend=extend.right)
+    lT1 := line.new(bar_index, tp1_px, bar_index+1, tp1_px, color=color.teal,  style=line.style_dotted, extend=extend.right)
+    lT2 := line.new(bar_index, tp2_px, bar_index+1, tp2_px, color=color.teal,  style=line.style_dotted, extend=extend.right)
+    lT3 := line.new(bar_index, tp3_px, bar_index+1, tp3_px, color=color.green, style=line.style_dotted, extend=extend.right)
+if strategy.position_size == 0
+    f_del()
+plotshape(enter_long,  title='Long',  style=shape.triangleup,   location=location.belowbar, color=color.green, size=size.tiny)
+plotshape(enter_short, title='Short', style=shape.triangledown, location=location.abovebar, color=color.red,   size=size.tiny)
+bgcolor(i_show_bg and regime_ok and macro_long ? color.new(color.green,92) : i_show_bg and regime_ok and macro_short ? color.new(color.red,92) : na)
+
+// --- Panel ---
+var table p = table.new(position.top_right, 2, 5, border_width=1)
+if barstate.islast
+    table.cell(p,0,0,'CB v13.1', text_color=color.white, bgcolor=color.new(color.blue,0))
+    table.cell(p,1,0,i_asset+' - '+modeStr, text_color=color.white, bgcolor=color.new(color.blue,0))
+    table.cell(p,0,1,'Score L/S')
+    table.cell(p,1,1,str.tostring(score_long)+' / '+str.tostring(score_short))
+    table.cell(p,0,2,'Regimen')
+    table.cell(p,1,2, regime_ok?'TENDENCIA':'RANGO', bgcolor=regime_ok?color.new(color.green,70):color.new(color.gray,70))
+    table.cell(p,0,3,'Dir')
+    table.cell(p,1,3,eff_dir)
+    table.cell(p,0,4,'Min/ADX')
+    table.cell(p,1,4,str.tostring(eff_minsc)+' / '+str.tostring(eff_adx))
+
+// --- Alertas ---
+alertcondition(enter_long,  'CB v13 Long',  'CB v13 LONG {{ticker}} {{interval}}')
+alertcondition(enter_short, 'CB v13 Short', 'CB v13 SHORT {{ticker}} {{interval}}')

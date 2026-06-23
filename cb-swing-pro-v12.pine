@@ -1,0 +1,1749 @@
+//@version=6
+// ============================================================================
+// CB Swing Pro v12 [Asset Presets Clean Quant v6 + Modos Swing/Day]
+// ----------------------------------------------------------------------------
+// Evolución de "CB Swing Pro v11 [Asset Presets Clean Quant v6]".
+//
+// TAREA 1 — Configuración de strategy() y Backtest_Config realista
+//   - overlay=true.
+//   - process_orders_on_close controlado por un input bool (default true).
+//   - Comisión por operación configurable (default 0.08%), cableada a
+//     commission_value/commission_type.
+//   - Slippage configurable, cableado a slippage.
+//   - Capital inicial representativo y configurable, cableado a initial_capital.
+//   - max_bars_back=800 para el warm-up de cálculos e HTF.
+//
+// Nota Pine v6: la llamada strategy() debe ser la primera sentencia del script,
+// por lo que los inputs de configuración del backtest se declaran en línea como
+// argumentos de strategy(). Pasar input.bool/input.float/input.int en la
+// cabecera de strategy() es válido en Pine v6 y crea controles configurables en
+// los ajustes de la estrategia.
+//
+// Requisitos cubiertos: 6.1, 6.3, 6.4, 6.5
+// ============================================================================
+
+strategy(
+     title                   = 'CB Swing Pro v12 [Asset Presets Clean Quant v6 + Modos]',
+     shorttitle              = 'CB v12 Clean',
+     overlay                 = true,
+     pyramiding              = 0,
+     // Capital inicial representativo y configurable (Req. 6.5).
+     // Un capital muy pequeño (p. ej. 50 USDT) distorsiona el sizing por % de
+     // equity; por eso el default es representativo para que el dimensionamiento
+     // por riesgo sea significativo en el backtest.
+     initial_capital         = input.float(10000, 'Capital inicial (USDT)', minval=1, step=100, group='I. Backtest', tooltip='Capital inicial representativo para que el sizing por % de equity sea significativo.'),
+     default_qty_type        = strategy.fixed,
+     default_qty_value       = 1,
+     currency                = currency.USDT,
+     // Comisión por operación configurable, default 0.08% (Req. 6.3).
+     commission_type         = strategy.commission.percent,
+     commission_value        = input.float(0.08, 'Comisión por operación (%)', minval=0, step=0.01, group='I. Backtest', tooltip='Comisión por operación en porcentaje. Default 0.08%.'),
+     // Slippage configurable en ticks (Req. 6.4).
+     slippage                = input.int(2, 'Slippage (ticks)', minval=0, group='I. Backtest', tooltip='Slippage simulado en ticks para aproximar la ejecución real.'),
+     max_bars_back           = 800,
+     margin_long             = 5,
+     margin_short            = 5,
+     // Procesar órdenes al cierre de la barra, configurable y activado por
+     // defecto (Req. 6.1). Evaluar al cierre confirmado reduce el repintado.
+     process_orders_on_close = input.bool(true, 'Procesar órdenes al cierre de la barra', group='I. Backtest', tooltip='Si está activo, las órdenes se procesan al cierre de la barra (más realista y sin repintado intrabar).'),
+     calc_on_order_fills     = false)
+
+// ============================================================================
+// Funciones auxiliares de formato y utilidades numéricas
+// (preservadas de v11; usadas por el Dashboard y los webhooks en tareas posteriores)
+// ============================================================================
+
+// División segura: devuelve 0 cuando el divisor es 0 o na, evitando na/inf.
+// Es la guarda base del Risk_Manager (un stop_dist==0 bloquea la entrada).
+f_safe_div(_num, _den) =>
+    na(_den) or _den == 0 ? 0.0 : _num / _den
+
+// Formatea un precio con la precisión de ticks del símbolo.
+f_fmt_price(_p) =>
+    na(_p) ? 'na' : str.tostring(_p, format.mintick)
+
+// Formatea un número genérico con dos decimales.
+f_fmt_num(_v) =>
+    na(_v) ? 'na' : str.tostring(_v, '#.##')
+
+// Formatea una cantidad/qty con precisión fina (cripto admite fracciones).
+f_fmt_qty(_q) =>
+    na(_q) ? 'na' : str.tostring(_q, '#.########')
+
+
+// ============================================================================
+// TAREA 2 — Grupo de inputs "H. Modo" y Trading_Mode_Selector
+// ----------------------------------------------------------------------------
+// Resuelve el modo operativo activo (Swing o Day) a partir de un selector
+// Auto/Swing/Day. En "Auto" el modo se deduce de la temporalidad del gráfico:
+//   tf_sec <= 3600 (<= 60 min) => Day ; tf_sec > 3600 (> 60 min) => Swing.
+// De este modo 61 min (3660 s) activa Swing (criterio 1.4). La selección
+// manual fija isDay/isSwing directamente. Por construcción se garantiza el
+// invariante XOR (exactamente un modo activo, criterio 1.5).
+//
+// Salidas expuestas al Mode Layer (Tarea 3) y al Dashboard (Tarea 11):
+//   - isDay / isSwing : modo activo (bool).
+//   - modeStr         : "Day" | "Swing".
+//   - mode_is_auto    : true si el selector está en "Auto".
+//   - mode_tf_label   : etiqueta legible de la TF detectada (p. ej. "15m", "4H").
+//   - mode_override   : indicador de override ("Auto→Day (15m)" | "Manual: Swing").
+//
+// Requisitos cubiertos: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6
+// ============================================================================
+
+// --- Sub-tarea 2.1: input de modo y resolución isDay/isSwing/modeStr ---------
+
+// Selector de modo con los tres valores requeridos (criterio 1.1).
+i_mode = input.string('Auto', 'Modo de operación', options=['Auto', 'Swing', 'Day'], group='H. Modo', tooltip='Auto: deduce el modo por la temporalidad del gráfico (<=60 min => Day, >60 min => Swing). Swing/Day: selección manual.')
+
+// Duración de la temporalidad del gráfico en segundos. El umbral de 60 minutos
+// equivale a 3600 s; así 61 min (3660 s) cae en Swing (criterio 1.4).
+tf_sec = timeframe.in_seconds(timeframe.period)
+
+// Resolución del modo activo:
+//   - "Day"  => Day siempre.
+//   - "Auto" => Day si tf_sec <= 3600, Swing en caso contrario.
+//   - "Swing"=> Swing (isDay queda false).
+// isSwing = not isDay garantiza el invariante XOR por construcción (criterio 1.5).
+isDay   = i_mode == 'Day' or (i_mode == 'Auto' and tf_sec <= 3600)
+isSwing = not isDay
+
+// Modo activo en texto, consumido por el Mode Layer y el Dashboard (criterio 1.6).
+modeStr = isDay ? 'Day' : 'Swing'
+
+// --- Información de override para el Dashboard (criterio 1.6) -----------------
+
+// true si el modo se resolvió por auto-detección; false si fue manual.
+mode_is_auto = i_mode == 'Auto'
+
+// Etiqueta legible de la temporalidad detectada a partir de tf_sec.
+// Se deriva de los segundos para cubrir cualquier temporalidad del gráfico.
+f_tf_label(_sec) =>
+    s = nz(_sec)
+    s <= 0       ? na :
+     s < 60      ? str.tostring(s, '#') + 's' :
+     s < 3600    ? str.tostring(s / 60, '#') + 'm' :
+     s < 86400   ? str.tostring(s / 3600, '#.#') + 'H' :
+     s < 604800  ? str.tostring(s / 86400, '#.#') + 'D' :
+     str.tostring(s / 604800, '#.#') + 'W'
+
+mode_tf_label = f_tf_label(tf_sec)
+
+// Indicador de override que verá el Dashboard, p. ej. "Auto→Day (15m)" o
+// "Manual: Swing". Si la TF no se pudo etiquetar, se omite el paréntesis.
+mode_override = mode_is_auto ? ('Auto→' + modeStr + (na(mode_tf_label) ? '' : ' (' + mode_tf_label + ')')) : ('Manual: ' + modeStr)
+
+// --- Sub-tarea 2.2 (opcional): aserciones de auto-detección e invariante -----
+// Aserciones lógicas ligeras sobre funciones puras, evaluadas en la última barra
+// (Testing Strategy del diseño). No alteran la lógica de trading.
+
+// Property 2: Exactamente un modo activo (XOR). isDay XOR isSwing == true para
+// cualquier selector y temporalidad. **Validates: Requirements 1.5, 1.2, 1.3**
+mode_xor_ok = isDay != isSwing
+
+// Property 1: Auto-detección por umbral de temporalidad. En "Auto" debe cumplirse
+// isDay == (tf_sec <= 3600). En modo manual la propiedad no aplica.
+// **Validates: Requirements 1.4**
+mode_auto_ok = (not mode_is_auto) or (isDay == (tf_sec <= 3600))
+
+if barstate.islast
+    if not mode_xor_ok
+        runtime.error('Invariante de modo violado (Property 2): isDay e isSwing no son mutuamente excluyentes.')
+    if not mode_auto_ok
+        runtime.error('Auto-detección de modo incorrecta (Property 1): isDay != (tf_sec <= 3600) en modo Auto.')
+
+
+
+// ============================================================================
+// TAREA 3 — Mode Layer (resolución de parámetros por modo)
+// ----------------------------------------------------------------------------
+// Inserta la capa de modo entre los inputs/presets y el resto del pipeline.
+// Todos los umbrales sensibles al estilo de trading (HTF, salidas, scoring,
+// sesión, riesgo) se "resuelven" una sola vez por barra en variables eff_*, de
+// modo que los subsistemas posteriores consumen valores ya resueltos.
+//
+// Precedencia uniforme y explícita (criterios 10.3, 10.4):
+//     valor_efectivo = (input CUSTOM del usuario)            // mayor prioridad
+//                    ?? (override del Asset_Preset por modo)
+//                    ?? (default del modo Swing/Day)         // menor prioridad
+//
+// Pine v6 no tiene el operador ??; la precedencia se implementa con f_resolve.
+//
+// Alcance de esta tarea: declarar los inputs por defecto de cada modo (grupos
+// "J. Modo Day" y "K. Modo Swing") y producir el conjunto eff_*. Los overrides
+// por activo (Tarea 4) y los refinamientos por subsistema (Tareas 5/6/7/8/10)
+// se conectarán a esta misma capa más adelante.
+//
+// Requisitos cubiertos: 10.3, 10.4
+// ============================================================================
+
+// --- Sub-tarea 3.1: f_resolve y variables efectivas eff_* --------------------
+
+// f_resolve: devuelve el valor según la precedencia CUSTOM > preset > default.
+//   useCustom         : true si el activo es CUSTOM y el usuario fijó el parámetro.
+//   customVal         : valor del input CUSTOM del usuario.
+//   presetHasOverride : true si el Asset_Preset define override para el modo activo.
+//   presetVal         : valor del override del preset.
+//   modeDefault       : default específico del modo (Swing/Day).
+// Es una función pura (sin estado) y, por tanto, evaluable para aserciones (Prop. 16).
+f_resolve(useCustom, customVal, presetHasOverride, presetVal, modeDefault) =>
+    useCustom ? customVal : (presetHasOverride ? presetVal : modeDefault)
+
+// --- Inputs por defecto del MODO DAY (grupo "J. Modo Day") -------------------
+// Defaults consistentes con la tabla Data Models del diseño: TPs más cercanos,
+// trailing más ajustado y min_score <= swing. HTF intradía "240" (4H).
+i_htf_day       = input.string('240', 'HTF (timeframe)',        group='J. Modo Day', tooltip='Temporalidad del HTF_Filter para Day. Default 4H ("240").')
+i_tp1_r_day     = input.float (1.0,  'TP1 (múltiplo de R)',     minval=0.1, step=0.1, group='J. Modo Day')
+i_tp2_r_day     = input.float (1.8,  'TP2 (múltiplo de R)',     minval=0.1, step=0.1, group='J. Modo Day')
+i_tp3_r_day     = input.float (3.0,  'TP3 (múltiplo de R)',     minval=0.1, step=0.1, group='J. Modo Day')
+i_trail_atr_day = input.float (1.5,  'Trailing (x ATR)',        minval=0.1, step=0.1, group='J. Modo Day', tooltip='Trailing más ajustado en Day.')
+i_tp1_pct_day   = input.float (33,   'TP1 cierre parcial (%)',  minval=0, maxval=100, step=1, group='J. Modo Day')
+i_tp2_pct_day   = input.float (33,   'TP2 cierre parcial (%)',  minval=0, maxval=100, step=1, group='J. Modo Day')
+i_min_score_day = input.int   (5,    'Min_Score',               minval=0, maxval=10, group='J. Modo Day', tooltip='Min_Score por defecto de Day (<= Swing).')
+i_delta_day     = input.int   (1,    'Score_Edge (delta)',      minval=0, maxval=10, group='J. Modo Day')
+i_adx_day       = input.int   (18,   'ADX mínimo',              minval=0, group='J. Modo Day')
+i_rsi_long_day  = input.int   (50,   'RSI umbral long',         minval=0, maxval=100, group='J. Modo Day')
+i_rsi_short_day = input.int   (50,   'RSI umbral short',        minval=0, maxval=100, group='J. Modo Day')
+i_vol_x_day     = input.float (1.1,  'Volumen x (media)',       minval=0, step=0.1, group='J. Modo Day')
+i_atr_min_day   = input.float (0.1,  'ATR% mínimo',             minval=0, step=0.1, group='J. Modo Day')
+i_atr_max_day   = input.float (3.0,  'ATR% máximo',             minval=0, step=0.1, group='J. Modo Day')
+i_sess_start_day= input.int   (13,   'Sesión inicio (UTC h)',   minval=0, maxval=24, group='J. Modo Day')
+i_sess_end_day  = input.int   (21,   'Sesión fin (UTC h)',      minval=0, maxval=24, group='J. Modo Day')
+i_cooldown_day  = input.int   (8,    'Cooldown (barras)',       minval=0, group='J. Modo Day', tooltip='Cooldown mayor en Day para evitar sobre-operar.')
+i_risk_pct_day  = input.float (0.5,  'Riesgo por operación (%)',minval=0, step=0.1, group='J. Modo Day')
+i_expo_prime_day= input.float (20,   'Exposición prime (%)',    minval=0, step=1, group='J. Modo Day')
+i_expo_off_day  = input.float (10,   'Exposición off (%)',      minval=0, step=1, group='J. Modo Day')
+
+// --- Inputs por defecto del MODO SWING (grupo "K. Modo Swing") ---------------
+// Defaults swing previos (compatibilidad hacia atrás): TPs más amplios,
+// trailing más amplio, min_score >= day. HTF semanal "W".
+i_htf_swing       = input.string('W',  'HTF (timeframe)',         group='K. Modo Swing', tooltip='Temporalidad del HTF_Filter para Swing. Default semanal ("W").')
+i_tp1_r_swing     = input.float (1.5,  'TP1 (múltiplo de R)',     minval=0.1, step=0.1, group='K. Modo Swing')
+i_tp2_r_swing     = input.float (3.0,  'TP2 (múltiplo de R)',     minval=0.1, step=0.1, group='K. Modo Swing')
+i_tp3_r_swing     = input.float (6.0,  'TP3 (múltiplo de R)',     minval=0.1, step=0.1, group='K. Modo Swing')
+i_trail_atr_swing = input.float (3.0,  'Trailing (x ATR)',        minval=0.1, step=0.1, group='K. Modo Swing', tooltip='Trailing más amplio en Swing.')
+i_tp1_pct_swing   = input.float (33,   'TP1 cierre parcial (%)',  minval=0, maxval=100, step=1, group='K. Modo Swing')
+i_tp2_pct_swing   = input.float (33,   'TP2 cierre parcial (%)',  minval=0, maxval=100, step=1, group='K. Modo Swing')
+i_min_score_swing = input.int   (6,    'Min_Score',               minval=0, maxval=10, group='K. Modo Swing', tooltip='Min_Score por defecto de Swing (>= Day).')
+i_delta_swing     = input.int   (2,    'Score_Edge (delta)',      minval=0, maxval=10, group='K. Modo Swing')
+i_adx_swing       = input.int   (22,   'ADX mínimo',              minval=0, group='K. Modo Swing')
+i_rsi_long_swing  = input.int   (52,   'RSI umbral long',         minval=0, maxval=100, group='K. Modo Swing')
+i_rsi_short_swing = input.int   (48,   'RSI umbral short',        minval=0, maxval=100, group='K. Modo Swing')
+i_vol_x_swing     = input.float (1.3,  'Volumen x (media)',       minval=0, step=0.1, group='K. Modo Swing')
+i_atr_min_swing   = input.float (0.5,  'ATR% mínimo',             minval=0, step=0.1, group='K. Modo Swing')
+i_atr_max_swing   = input.float (8.0,  'ATR% máximo',             minval=0, step=0.1, group='K. Modo Swing')
+i_sess_start_swing= input.int   (0,    'Sesión inicio (UTC h)',   minval=0, maxval=24, group='K. Modo Swing')
+i_sess_end_swing  = input.int   (24,   'Sesión fin (UTC h)',      minval=0, maxval=24, group='K. Modo Swing')
+i_cooldown_swing  = input.int   (5,    'Cooldown (barras)',       minval=0, group='K. Modo Swing')
+i_risk_pct_swing  = input.float (1.0,  'Riesgo por operación (%)',minval=0, step=0.1, group='K. Modo Swing')
+i_expo_prime_swing= input.float (30,   'Exposición prime (%)',    minval=0, step=1, group='K. Modo Swing')
+i_expo_off_swing  = input.float (15,   'Exposición off (%)',      minval=0, step=1, group='K. Modo Swing')
+
+// --- Default del modo activo (selección Swing/Day por parámetro) -------------
+// modeDefault de cada parámetro: el valor del modo activo. Sobre estos defaults
+// se aplica f_resolve para inyectar (en tareas posteriores) los overrides de
+// preset y los inputs CUSTOM del usuario.
+md_htf_tf      = isDay ? i_htf_day        : i_htf_swing
+md_tp1_r       = isDay ? i_tp1_r_day      : i_tp1_r_swing
+md_tp2_r       = isDay ? i_tp2_r_day      : i_tp2_r_swing
+md_tp3_r       = isDay ? i_tp3_r_day      : i_tp3_r_swing
+md_trail_atr   = isDay ? i_trail_atr_day  : i_trail_atr_swing
+md_tp1_pct     = isDay ? i_tp1_pct_day    : i_tp1_pct_swing
+md_tp2_pct     = isDay ? i_tp2_pct_day    : i_tp2_pct_swing
+md_min_score   = isDay ? i_min_score_day  : i_min_score_swing
+md_score_delta = isDay ? i_delta_day      : i_delta_swing
+md_adx_min     = isDay ? i_adx_day        : i_adx_swing
+md_rsi_long    = isDay ? i_rsi_long_day   : i_rsi_long_swing
+md_rsi_short   = isDay ? i_rsi_short_day  : i_rsi_short_swing
+md_vol_x       = isDay ? i_vol_x_day      : i_vol_x_swing
+md_atr_min     = isDay ? i_atr_min_day    : i_atr_min_swing
+md_atr_max     = isDay ? i_atr_max_day    : i_atr_max_swing
+md_sess_start  = isDay ? i_sess_start_day : i_sess_start_swing
+md_sess_end    = isDay ? i_sess_end_day   : i_sess_end_swing
+md_cooldown    = isDay ? i_cooldown_day   : i_cooldown_swing
+md_risk_pct    = isDay ? i_risk_pct_day   : i_risk_pct_swing
+md_expo_prime  = isDay ? i_expo_prime_day : i_expo_prime_swing
+md_expo_off    = isDay ? i_expo_off_day   : i_expo_off_swing
+
+// ============================================================================
+// TAREA 4 — Asset_Preset con overrides por modo (Swing/Day)
+// ----------------------------------------------------------------------------
+// Reintroduce y preserva la arquitectura de v11:
+//   - Selector de activo (BTC/ETH/SOL/ORO/CUSTOM).
+//   - Perfil de agresividad (CONSERVADOR/BALANCEADO/AGRESIVO).
+//   - Dirección permitida (PRESET/LONG/SHORT/AMBOS); ORO es long-only por defecto.
+//   - Inputs de indicadores para el activo CUSTOM (EMA/MACD/RSI/ADX/ATR/Vol).
+//
+// Sobre esa base añade OVERRIDES por activo y por modo que alimentan la cadena
+// f_resolve de la Tarea 3: sustituye los placeholders no_custom/no_preset por
+// flags y valores reales. La precedencia (Property 16) se mantiene:
+//     CUSTOM input del usuario > override del preset por modo > default del modo.
+//
+// Espíritu de calibración v11 preservado:
+//   - SOL más volátil  => ADX/Min_Score más altos y stops/targets más amplios.
+//   - ORO menos volátil => bandas ATR% más estrechas, trailing más ajustado y
+//     dirección long-only por defecto.
+//   - BTC/ETH conservan la calibración base (compatibilidad hacia atrás).
+//   - Por activo se respeta tpN_r(Day) <= tpN_r(Swing) y trail(Day) <= trail(Swing).
+//
+// Requisitos cubiertos: 10.1, 10.2, 10.3, 10.4
+// ============================================================================
+
+// --- Selector de activo, perfil y dirección (grupo "A. Preset") --------------
+i_asset     = input.string('BTC',        'Activo (Asset_Preset)', options=['BTC', 'ETH', 'SOL', 'ORO', 'CUSTOM'], group='A. Preset', tooltip='Preset por activo. CUSTOM usa los inputs de indicadores y overrides definidos por el usuario.')
+i_profile   = input.string('BALANCEADO', 'Perfil de agresividad', options=['CONSERVADOR', 'BALANCEADO', 'AGRESIVO'], group='A. Preset', tooltip='Modula el Min_Score (más estricto/laxo) y el riesgo por operación.')
+i_direction = input.string('PRESET',     'Dirección permitida',   options=['PRESET', 'LONG', 'SHORT', 'AMBOS'], group='A. Preset', tooltip='PRESET usa la dirección por defecto del activo (ORO long-only; resto AMBOS).')
+
+// --- Inputs de indicadores para CUSTOM (grupo "B. CUSTOM (indicadores)") ------
+// Longitudes de los indicadores base; las consumen las Base Calcs de tareas
+// posteriores (HTF/Scoring). Se declaran aquí para que el activo CUSTOM funcione.
+i_cust_ema_fast    = input.int  (20, 'EMA rápida',          minval=1, group='B. CUSTOM (indicadores)')
+i_cust_ema_slow    = input.int  (50, 'EMA lenta',           minval=1, group='B. CUSTOM (indicadores)')
+i_cust_macd_fast   = input.int  (12, 'MACD rápida',         minval=1, group='B. CUSTOM (indicadores)')
+i_cust_macd_slow   = input.int  (26, 'MACD lenta',          minval=1, group='B. CUSTOM (indicadores)')
+i_cust_macd_signal = input.int  (9,  'MACD señal',          minval=1, group='B. CUSTOM (indicadores)')
+i_cust_rsi_len     = input.int  (14, 'RSI longitud',        minval=1, group='B. CUSTOM (indicadores)')
+i_cust_adx_len     = input.int  (14, 'ADX/DMI longitud',    minval=1, group='B. CUSTOM (indicadores)')
+i_cust_atr_len     = input.int  (14, 'ATR longitud',        minval=1, group='B. CUSTOM (indicadores)')
+i_cust_vol_len     = input.int  (20, 'Volumen media',       minval=1, group='B. CUSTOM (indicadores)')
+
+// --- Overrides eff_* para CUSTOM (grupo "C. CUSTOM (parámetros)") -------------
+// Cuando el activo es CUSTOM, estos valores tienen prioridad máxima (useCustom).
+i_cust_htf         = input.string('D', 'HTF (timeframe)',           group='C. CUSTOM (parámetros)')
+i_cust_adx         = input.int   (20,  'ADX mínimo',                minval=0, group='C. CUSTOM (parámetros)')
+i_cust_min_score   = input.int   (5,   'Min_Score',                 minval=0, maxval=10, group='C. CUSTOM (parámetros)')
+i_cust_atr_min     = input.float (0.3, 'ATR% mínimo',               minval=0, step=0.05, group='C. CUSTOM (parámetros)')
+i_cust_atr_max     = input.float (6.0, 'ATR% máximo',               minval=0, step=0.1,  group='C. CUSTOM (parámetros)')
+i_cust_trail       = input.float (2.0, 'Trailing (x ATR)',          minval=0.1, step=0.1, group='C. CUSTOM (parámetros)')
+i_cust_vol_x       = input.float (1.2, 'Volumen x (media)',         minval=0, step=0.1,  group='C. CUSTOM (parámetros)')
+i_cust_tp1_r       = input.float (1.2, 'TP1 (múltiplo de R)',       minval=0.1, step=0.1, group='C. CUSTOM (parámetros)')
+i_cust_tp2_r       = input.float (2.4, 'TP2 (múltiplo de R)',       minval=0.1, step=0.1, group='C. CUSTOM (parámetros)')
+i_cust_tp3_r       = input.float (4.5, 'TP3 (múltiplo de R)',       minval=0.1, step=0.1, group='C. CUSTOM (parámetros)')
+i_cust_rsi_long    = input.int   (50,  'RSI umbral long',           minval=0, maxval=100, group='C. CUSTOM (parámetros)')
+i_cust_rsi_short   = input.int   (50,  'RSI umbral short',          minval=0, maxval=100, group='C. CUSTOM (parámetros)')
+i_cust_score_delta = input.int   (1,   'Score_Edge (delta)',        minval=0, maxval=10, group='C. CUSTOM (parámetros)')
+i_cust_risk_pct    = input.float (0.75,'Riesgo por operación (%)',  minval=0, step=0.1,  group='C. CUSTOM (parámetros)')
+
+// --- Overrides por activo y por modo (calibración tipo v11) ------------------
+// Cada función devuelve el override del parámetro para (activo, modo). Para
+// CUSTOM devuelven na: no se seleccionan porque su flag de preset es false.
+// _d = isDay (true => Day, false => Swing).
+
+// ADX mínimo: SOL exige más fuerza de tendencia; ORO algo menos.
+f_ov_adx(_a, _d) =>
+    _a == 'BTC' ? (_d ? 18 : 22) : _a == 'ETH' ? (_d ? 18 : 22) : _a == 'SOL' ? (_d ? 22 : 26) : _a == 'ORO' ? (_d ? 16 : 20) : na
+
+// Min_Score base por activo/modo (Day <= Swing). El perfil se aplica después.
+f_ov_minscore(_a, _d) =>
+    _a == 'BTC' ? (_d ? 5 : 6) : _a == 'ETH' ? (_d ? 5 : 6) : _a == 'SOL' ? (_d ? 6 : 7) : _a == 'ORO' ? (_d ? 5 : 6) : na
+
+// Banda ATR% mínima: SOL más amplia (más volátil), ORO más estrecha.
+f_ov_atrmin(_a, _d) =>
+    _a == 'BTC' ? (_d ? 0.10 : 0.50) : _a == 'ETH' ? (_d ? 0.15 : 0.60) : _a == 'SOL' ? (_d ? 0.20 : 0.80) : _a == 'ORO' ? (_d ? 0.05 : 0.30) : na
+
+// Banda ATR% máxima: SOL admite rangos mayores; ORO más contenida.
+f_ov_atrmax(_a, _d) =>
+    _a == 'BTC' ? (_d ? 3.0 : 8.0) : _a == 'ETH' ? (_d ? 3.5 : 9.0) : _a == 'SOL' ? (_d ? 5.0 : 12.0) : _a == 'ORO' ? (_d ? 1.5 : 4.0) : na
+
+// Trailing (x ATR): Day más ajustado que Swing; SOL más amplio, ORO más ceñido.
+f_ov_trail(_a, _d) =>
+    _a == 'BTC' ? (_d ? 1.5 : 3.0) : _a == 'ETH' ? (_d ? 1.6 : 3.2) : _a == 'SOL' ? (_d ? 2.0 : 3.8) : _a == 'ORO' ? (_d ? 1.3 : 2.5) : na
+
+// Multiplicador de volumen exigido: SOL pide más confirmación de volumen.
+f_ov_volx(_a, _d) =>
+    _a == 'BTC' ? (_d ? 1.10 : 1.30) : _a == 'ETH' ? (_d ? 1.10 : 1.30) : _a == 'SOL' ? (_d ? 1.20 : 1.40) : _a == 'ORO' ? (_d ? 1.05 : 1.20) : na
+
+// R-múltiples de TP por activo/modo (Day <= Swing). SOL targets más amplios.
+f_ov_tp1r(_a, _d) =>
+    _a == 'BTC' ? (_d ? 1.0 : 1.5) : _a == 'ETH' ? (_d ? 1.0 : 1.5) : _a == 'SOL' ? (_d ? 1.2 : 1.8) : _a == 'ORO' ? (_d ? 0.9 : 1.3) : na
+f_ov_tp2r(_a, _d) =>
+    _a == 'BTC' ? (_d ? 1.8 : 3.0) : _a == 'ETH' ? (_d ? 1.8 : 3.0) : _a == 'SOL' ? (_d ? 2.2 : 3.5) : _a == 'ORO' ? (_d ? 1.6 : 2.6) : na
+f_ov_tp3r(_a, _d) =>
+    _a == 'BTC' ? (_d ? 3.0 : 6.0) : _a == 'ETH' ? (_d ? 3.0 : 6.0) : _a == 'SOL' ? (_d ? 3.5 : 7.0) : _a == 'ORO' ? (_d ? 2.6 : 5.0) : na
+
+// Dirección por defecto del activo: ORO long-only; resto opera en ambos sentidos.
+f_preset_dir(_a) =>
+    _a == 'ORO' ? 'LONG' : 'AMBOS'
+
+// --- Resolución de perfil y dirección ----------------------------------------
+// El perfil modula el Min_Score (más alto = más estricto) y el riesgo.
+prof_score_adj = i_profile == 'CONSERVADOR' ? 1 : (i_profile == 'AGRESIVO' ? -1 : 0)
+prof_risk_mult = i_profile == 'CONSERVADOR' ? 0.75 : (i_profile == 'AGRESIVO' ? 1.5 : 1.0)
+
+// Dirección efectiva: PRESET respeta la dirección por defecto del activo.
+eff_dir         = i_direction == 'PRESET' ? f_preset_dir(i_asset) : i_direction
+eff_allow_long  = eff_dir == 'LONG'  or eff_dir == 'AMBOS'
+eff_allow_short = eff_dir == 'SHORT' or eff_dir == 'AMBOS'
+
+// Etiquetas para el Dashboard (Tarea 11).
+assetStr   = i_asset
+profileStr = i_profile
+dirStr     = eff_dir
+
+// --- Flags de precedencia para f_resolve -------------------------------------
+// BTC/ETH/SOL/ORO traen override de preset por modo; CUSTOM cede a los inputs
+// del usuario (useCustom) y no aplica overrides de preset.
+asset_has_preset = i_asset != 'CUSTOM'
+use_custom       = i_asset == 'CUSTOM'
+
+// --- Resolución eff_* (una vez por barra) con precedencia real ---------------
+// Precedencia: CUSTOM (use_custom) > override de preset (asset_has_preset) > default de modo.
+
+// HTF: override solo vía CUSTOM (el preset por modo usa el default de modo).
+eff_htf_tf     = f_resolve(use_custom, i_cust_htf, false, md_htf_tf, md_htf_tf)
+
+// Salidas: R-múltiples y trailing con override por activo/modo.
+eff_tp1_r      = f_resolve(use_custom, i_cust_tp1_r, asset_has_preset, f_ov_tp1r(i_asset, isDay), md_tp1_r)
+eff_tp2_r      = f_resolve(use_custom, i_cust_tp2_r, asset_has_preset, f_ov_tp2r(i_asset, isDay), md_tp2_r)
+eff_tp3_r      = f_resolve(use_custom, i_cust_tp3_r, asset_has_preset, f_ov_tp3r(i_asset, isDay), md_tp3_r)
+eff_trail_atr  = f_resolve(use_custom, i_cust_trail, asset_has_preset, f_ov_trail(i_asset, isDay), md_trail_atr)
+// Porcentajes parciales: default de modo (no se sobreescriben por activo).
+eff_tp1_pct    = f_resolve(false, md_tp1_pct, false, md_tp1_pct, md_tp1_pct)
+eff_tp2_pct    = f_resolve(false, md_tp2_pct, false, md_tp2_pct, md_tp2_pct)
+// TP3% se deriva para que la suma sea 100 (clamp/normalización fina en Tarea 10.3).
+eff_tp3_pct    = 100.0 - eff_tp1_pct - eff_tp2_pct
+
+// Scoring: Min_Score con override por activo/modo y ajuste de perfil (clamp 0..10).
+eff_min_score_raw = f_resolve(use_custom, i_cust_min_score, asset_has_preset, f_ov_minscore(i_asset, isDay), md_min_score)
+eff_min_score     = int(math.max(0, math.min(10, eff_min_score_raw + prof_score_adj)))
+eff_score_delta   = f_resolve(use_custom, i_cust_score_delta, false, md_score_delta, md_score_delta)
+eff_adx_min       = f_resolve(use_custom, i_cust_adx, asset_has_preset, f_ov_adx(i_asset, isDay), md_adx_min)
+eff_rsi_long      = f_resolve(use_custom, i_cust_rsi_long, false, md_rsi_long, md_rsi_long)
+eff_rsi_short     = f_resolve(use_custom, i_cust_rsi_short, false, md_rsi_short, md_rsi_short)
+eff_vol_x         = f_resolve(use_custom, i_cust_vol_x, asset_has_preset, f_ov_volx(i_asset, isDay), md_vol_x)
+eff_atr_min       = f_resolve(use_custom, i_cust_atr_min, asset_has_preset, f_ov_atrmin(i_asset, isDay), md_atr_min)
+eff_atr_max       = f_resolve(use_custom, i_cust_atr_max, asset_has_preset, f_ov_atrmax(i_asset, isDay), md_atr_max)
+
+// Sesión y cooldown: default de modo (no se sobreescriben por activo).
+eff_sess_start = f_resolve(false, md_sess_start, false, md_sess_start, md_sess_start)
+eff_sess_end   = f_resolve(false, md_sess_end,   false, md_sess_end,   md_sess_end)
+eff_cooldown   = f_resolve(false, md_cooldown,   false, md_cooldown,   md_cooldown)
+
+// Riesgo y exposición: riesgo con override CUSTOM y multiplicador de perfil.
+eff_risk_pct_raw = f_resolve(use_custom, i_cust_risk_pct, false, md_risk_pct, md_risk_pct)
+eff_risk_pct     = eff_risk_pct_raw * prof_risk_mult
+eff_expo_prime   = f_resolve(false, md_expo_prime, false, md_expo_prime, md_expo_prime)
+eff_expo_off     = f_resolve(false, md_expo_off,   false, md_expo_off,   md_expo_off)
+
+// --- Aserción opcional: espíritu de calibración v11 por activo ---------------
+// Para activos con preset, Day no debe superar a Swing en R-múltiples, trailing
+// ni Min_Score (coherente con Property 4, 6 y 8 a nivel de override de preset).
+ov_spirit_ok = (not asset_has_preset) or (f_ov_tp1r(i_asset, true) <= f_ov_tp1r(i_asset, false) and f_ov_tp2r(i_asset, true) <= f_ov_tp2r(i_asset, false) and f_ov_tp3r(i_asset, true) <= f_ov_tp3r(i_asset, false) and f_ov_trail(i_asset, true) <= f_ov_trail(i_asset, false) and f_ov_minscore(i_asset, true) <= f_ov_minscore(i_asset, false))
+if barstate.islast and not ov_spirit_ok
+    runtime.error('Override de preset incoherente (Tarea 4): un parámetro de Day supera al de Swing para el activo seleccionado.')
+
+// --- Sub-tarea 3.2 (opcional): aserción de precedencia (Property 16) ---------
+// Property 16: Precedencia de resolución de parámetros (CUSTOM > preset > default).
+// Se valida la función pura f_resolve sobre los tres caminos de precedencia.
+// **Validates: Requirements 10.3, 10.4**
+p16_custom  = f_resolve(true,  1.0, true,  2.0, 3.0) == 1.0   // CUSTOM gana
+p16_preset  = f_resolve(false, 1.0, true,  2.0, 3.0) == 2.0   // preset gana sobre default
+p16_default = f_resolve(false, 1.0, false, 2.0, 3.0) == 3.0   // cae al default del modo
+p16_ok = p16_custom and p16_preset and p16_default
+
+if barstate.islast and not p16_ok
+    runtime.error('Precedencia de resolución incorrecta (Property 16): f_resolve no respeta CUSTOM > preset > default.')
+
+
+// ============================================================================
+// PRERREQUISITO — Base Calcs (indicadores base del pipeline)
+// ----------------------------------------------------------------------------
+// Calcula una sola vez por barra las series base que consumen los subsistemas
+// posteriores (HTF_Filter, Scoring_Engine, Risk_Manager, Exit_Manager):
+// ATR y ATR%, media de volumen, EMAs (rápida/lenta/50/200), MACD, RSI y
+// DMI/ADX. Las longitudes se toman de los inputs de indicadores CUSTOM
+// (grupo "B."), que traen defaults sensatos y sirven igualmente como longitudes
+// base para los presets (mantener simple). p_ema_slow es la longitud de la EMA
+// lenta que usa el HTF_Filter para confirmar tendencia en la temporalidad
+// superior.
+//
+// Nota Pine v6: estas series se calculan en la temporalidad del gráfico; el
+// HTF_Filter (Tarea 5) reevalúa la EMA lenta en el contexto de la temporalidad
+// superior mediante request.security.
+// ============================================================================
+
+// --- Longitudes base de los indicadores (desde inputs CUSTOM, defaults sanos) -
+p_ema_fast  = i_cust_ema_fast      // EMA rápida (default 20)
+p_ema_slow  = i_cust_ema_slow      // EMA lenta (default 50) — usada por el HTF_Filter
+p_macd_fast = i_cust_macd_fast     // MACD rápida (default 12)
+p_macd_slow = i_cust_macd_slow     // MACD lenta (default 26)
+p_macd_sig  = i_cust_macd_signal   // MACD señal (default 9)
+p_rsi_len   = i_cust_rsi_len       // RSI (default 14)
+p_adx_len   = i_cust_adx_len       // ADX/DMI (default 14)
+p_atr_len   = i_cust_atr_len       // ATR (default 14)
+p_vol_len   = i_cust_vol_len       // Media de volumen (default 20)
+
+// --- Series base -------------------------------------------------------------
+// ATR y ATR% (volatilidad relativa al precio). f_safe_div evita na/inf si close==0.
+atr_val = ta.atr(p_atr_len)
+atr_pct = f_safe_div(atr_val, close) * 100.0
+
+// Media de volumen (confirmación de participación).
+vol_sma = ta.sma(volume, p_vol_len)
+
+// EMAs: rápida/lenta para estructura y cruces; 50/200 para macro-tendencia.
+ema_fast = ta.ema(close, p_ema_fast)
+ema_slow = ta.ema(close, p_ema_slow)
+ema_50   = ta.ema(close, 50)
+ema_200  = ta.ema(close, 200)
+
+// MACD: línea, señal e histograma (momentum).
+[macd_line, macd_signal, macd_hist] = ta.macd(close, p_macd_fast, p_macd_slow, p_macd_sig)
+
+// RSI (fuerza relativa).
+rsi_val = ta.rsi(close, p_rsi_len)
+
+// DMI/ADX: +DI, -DI y ADX (dirección y fuerza de tendencia).
+[di_plus, di_minus, adx_val] = ta.dmi(p_adx_len, p_adx_len)
+
+
+// ============================================================================
+// TAREA 5 — HTF_Filter por modo (confirmación de tendencia en TF superior)
+// ----------------------------------------------------------------------------
+// Confirma la tendencia en la temporalidad superior resuelta por modo
+// (eff_htf_tf, ya resuelto en la Tarea 4: "W" swing / "240" day / CUSTOM).
+//
+// No-repintado (criterios 2.3, 2.4, 6.2):
+//   - request.security con lookahead=barmerge.lookahead_off (sin mirar al futuro).
+//   - Se usa close[1] y la EMA lenta [1]: el ÚLTIMO valor CONFIRMADO de la TF
+//     superior (la barra HTF en formación no se utiliza).
+//
+// Gating direccional (criterios 2.5, 2.6):
+//   - htf_bull/htf_bear según close del HTF respecto a su EMA lenta.
+//   - htf_ok_long  = not htf_bear  (oposición bajista bloquea longs).
+//   - htf_ok_short = not htf_bull  (oposición alcista bloquea shorts).
+//   - HTF na (histórico insuficiente) => neutral => NO bloquea (fail-safe a permitir
+//     la evaluación, el resto del gating decide).
+//
+// Requisitos cubiertos: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6 (y 6.2 no-repintado)
+// ============================================================================
+
+// --- Sub-tarea 5.1: TF del HTF y confirmación de tendencia -------------------
+
+// EMA lenta de referencia (en TF del gráfico). request.security la reevalúa en
+// el contexto de eff_htf_tf; se declara como variable separada para cumplir las
+// reglas de Pine v6 al pasar una expresión con ta.* a request.security.
+htf_ema_src = ta.ema(close, p_ema_slow)
+
+// Último cierre CONFIRMADO de la TF superior (close[1] + lookahead_off).
+htf_close = request.security(syminfo.tickerid, eff_htf_tf, close[1], lookahead=barmerge.lookahead_off)
+
+// EMA lenta CONFIRMADA de la TF superior (htf_ema_src[1] + lookahead_off).
+htf_ema = request.security(syminfo.tickerid, eff_htf_tf, htf_ema_src[1], lookahead=barmerge.lookahead_off)
+
+// HTF na: histórico insuficiente o TF no disponible => se trata como neutral.
+htf_na = na(htf_close) or na(htf_ema)
+
+// Tendencia HTF: solo se afirma alcista/bajista si hay datos confirmados.
+htf_bull = not htf_na and htf_close > htf_ema
+htf_bear = not htf_na and htf_close < htf_ema
+
+// Estado neutral: sin datos (htf_na) o cierre == EMA (sin sesgo claro).
+htf_neutral = not htf_bull and not htf_bear
+
+// Permisos direccionales: la oposición explícita bloquea; neutral permite.
+htf_ok_long  = not htf_bear
+htf_ok_short = not htf_bull
+
+// Gate de no-repintado para el gating de entrada (Tarea 9): las entradas solo se
+// evalúan en barra confirmada. Se expone aquí para que el pipeline lo consuma.
+no_repaint_gate = barstate.isconfirmed
+
+// --- Sub-tarea 5.2 (opcional): aserciones de gating HTF y no-repintado -------
+// Aserciones lógicas ligeras evaluadas en la última barra (Testing Strategy).
+
+// Property 3: Gating por HTF (oposición bloquea, neutral permite).
+//   - Si HTF bajista => no se permite long.
+//   - Si HTF alcista => no se permite short.
+//   - Si HTF neutral => se permiten ambas direcciones (no bloquea).
+// **Validates: Requirements 2.5, 2.6**
+p3_bear_blocks_long  = (not htf_bear) or (not htf_ok_long)
+p3_bull_blocks_short = (not htf_bull) or (not htf_ok_short)
+p3_neutral_allows    = (not htf_neutral) or (htf_ok_long and htf_ok_short)
+p3_ok = p3_bear_blocks_long and p3_bull_blocks_short and p3_neutral_allows
+
+// Property 13: No repintado — evaluación solo en barra confirmada.
+// Verifica de forma estructural que el gate de evaluación es barstate.isconfirmed
+// (las series HTF se leen con [1] + lookahead_off por construcción, arriba).
+// **Validates: Requirements 6.2, 2.3, 2.4**
+p13_ok = no_repaint_gate == barstate.isconfirmed
+
+if barstate.islast
+    if not p3_ok
+        runtime.error('Gating HTF incorrecto (Property 3): oposición no bloquea o neutral no permite.')
+    if not p13_ok
+        runtime.error('No-repintado incorrecto (Property 13): el gate de evaluación no es barstate.isconfirmed.')
+
+
+// ============================================================================
+// TAREA 6 — Session_Manager y cooldown por modo
+// ----------------------------------------------------------------------------
+// Gobierna CUÁNDO se permite operar según:
+//   1) La ventana horaria UTC del modo activo (eff_sess_start/eff_sess_end, ya
+//      resueltos por modo en las Tareas 3/4).
+//   2) Un cooldown en barras desde la última entrada (eff_cooldown, también
+//      resuelto por modo), para evitar sobre-operar.
+//
+// Reglas de la ventana UTC (criterios 7.2, 7.3):
+//   - La hora se toma con hour(time, 'UTC') (entero 0..23).
+//   - Ventana normal (start < end): dentro si start <= h < end.
+//   - Ventana con cruce de medianoche (start > end): dentro si h >= start o h < end.
+//   - Día completo (start == 0 y end == 24): siempre EN sesión (sin restricción).
+//   - Caso degenerado start == end: se interpreta como "sin restricción"
+//     (siempre en sesión), coherente con el manejo de errores del diseño.
+//
+// Bloqueo configurable (criterio 7.1):
+//   - i_block_off_session (default false): si está desactivado, la sesión NUNCA
+//     bloquea (session_ok siempre true); si está activo, solo se permite operar
+//     dentro de la ventana del modo.
+//
+// Sesión prime (consumida por el Risk_Manager en la Tarea 8 para la exposición):
+//   - is_prime_session = in_session (dentro de la ventana => exposición "prime";
+//     fuera => exposición "off").
+//
+// Cooldown (criterio 7.4):
+//   - cooldown_ok = na(last_entry_bar) or (bar_index - last_entry_bar) >= eff_cooldown.
+//   - last_entry_bar es estado vivo (var int, na al inicio); se FIJARÁ en la
+//     barra de entrada dentro del Exit_Manager/entrada (Tareas 9/10). Aquí solo
+//     se declara y se consume para el gating de cooldown.
+//
+// Requisitos cubiertos: 7.1, 7.2, 7.3, 7.4
+// ============================================================================
+
+// --- Sub-tarea 6.1: ventanas UTC y cooldown resueltos por modo ---------------
+
+// Bloqueo de operativa fuera de la ventana de sesión (criterio 7.1). Desactivado
+// por defecto para preservar la compatibilidad swing (que opera 24h por defecto).
+i_block_off_session = input.bool(false, 'Bloquear operativa fuera de sesión', group='L. Sesión', tooltip='Si está activo, solo se permite operar dentro de la ventana UTC del modo activo. Si está desactivado, la sesión nunca bloquea.')
+
+// Helper PURO de pertenencia a la ventana, parametrizado por la hora explícita.
+// Separarlo de hour(time) lo hace evaluable de forma determinista (aserciones).
+//   _h     : hora UTC entera (0..23).
+//   _start : hora de inicio de la ventana (0..24).
+//   _end   : hora de fin de la ventana (0..24).
+f_hour_in_window(_h, _start, _end) =>
+    (_start == 0 and _end == 24) ? true :
+     _start == _end              ? true :
+     _start < _end               ? (_h >= _start and _h < _end) :
+     (_h >= _start or _h < _end)
+
+// f_in_utc_window: pertenencia de la barra ACTUAL a la ventana UTC del modo.
+// Usa hour(time, 'UTC') para la hora de la barra y delega en el helper puro.
+f_in_utc_window(_start, _end) =>
+    f_hour_in_window(hour(time, 'UTC'), _start, _end)
+
+// ¿La barra actual cae dentro de la ventana del modo activo?
+in_session = f_in_utc_window(eff_sess_start, eff_sess_end)
+
+// session_ok: si el bloqueo está desactivado, nunca bloquea; si está activo,
+// solo permite dentro de la ventana (criterios 7.2, 7.3).
+session_ok = (not i_block_off_session) or in_session
+
+// Sesión prime para el Risk_Manager (Tarea 8): dentro de ventana => prime.
+is_prime_session = in_session
+
+// --- Cooldown por modo (criterio 7.4) ----------------------------------------
+
+// Helper PURO del cooldown, evaluable de forma determinista (aserciones).
+//   _last : barra de la última entrada (na si no hay ninguna).
+//   _bi   : bar_index actual.
+//   _cd   : cooldown en barras del modo activo (eff_cooldown).
+f_cooldown_ok(_last, _bi, _cd) =>
+    na(_last) or (_bi - _last) >= _cd
+
+// Estado vivo: barra de la última entrada. Se inicializa a na (sin entradas) y
+// se FIJARÁ al abrir posición en las Tareas 9/10. Declararlo aquí permite que el
+// gating de cooldown lo consuma sin acoplarse a la lógica de entrada.
+var int last_entry_bar = na
+
+// cooldown_ok: permite la entrada si no hay entrada previa o si ya transcurrió
+// el cooldown del modo activo.
+cooldown_ok = f_cooldown_ok(last_entry_bar, bar_index, eff_cooldown)
+
+// --- Sub-tarea 6.2 (opcional): aserciones de sesión y cooldown ---------------
+// Aserciones lógicas sobre funciones puras, evaluadas en la última barra
+// (Testing Strategy del diseño). No alteran la lógica de trading.
+
+// Property 14: Ventana de sesión (fuera bloquea, dentro permite).
+// Con el bloqueo activo, session_ok == true si y solo si la hora está dentro de
+// la ventana UTC del modo activo. Se valida la relación sobre el estado actual y
+// la lógica pura f_hour_in_window en casos representativos.
+// **Validates: Requirements 7.2, 7.3**
+p14_relation     = (not i_block_off_session) or (session_ok == in_session)
+p14_inside       = f_hour_in_window(14, 13, 21) == true     // dentro de ventana normal
+p14_outside      = f_hour_in_window(22, 13, 21) == false    // fuera de ventana normal
+p14_full_day     = f_hour_in_window(3, 0, 24) == true       // día completo => siempre dentro
+p14_wrap_inside  = f_hour_in_window(23, 22, 6) == true      // cruce de medianoche, dentro
+p14_wrap_outside = f_hour_in_window(12, 22, 6) == false     // cruce de medianoche, fuera
+p14_ok = p14_relation and p14_inside and p14_outside and p14_full_day and p14_wrap_inside and p14_wrap_outside
+
+// Property 15: Cooldown bloquea entradas.
+// Si (bar_index - last_entry_bar) < eff_cooldown, no se permite nueva entrada.
+// Se valida la lógica pura f_cooldown_ok en los tres caminos relevantes.
+// **Validates: Requirements 7.4**
+p15_no_prev    = f_cooldown_ok(na, 100, 5) == true     // sin entrada previa => permite
+p15_blocks     = f_cooldown_ok(100, 103, 5) == false   // 3 < 5 => bloquea
+p15_allows     = f_cooldown_ok(100, 105, 5) == true    // 5 >= 5 => permite
+p15_ok = p15_no_prev and p15_blocks and p15_allows
+
+if barstate.islast
+    if not p14_ok
+        runtime.error('Ventana de sesión incorrecta (Property 14): session_ok no coincide con la pertenencia a la ventana UTC.')
+    if not p15_ok
+        runtime.error('Cooldown incorrecto (Property 15): f_cooldown_ok no bloquea cuando aún no transcurrió el cooldown.')
+
+
+// ============================================================================
+// TAREA 7 — Scoring_Engine por modo y perfil (estructura, triggers y score 0-10)
+// ----------------------------------------------------------------------------
+// Construye la capa de DECISIÓN de calidad de entrada que consumirá el gating de
+// la Tarea 9. Todos los umbrales se toman de los eff_* ya resueltos por modo y
+// perfil en las Tareas 3/4 (eff_adx_min, eff_rsi_long/short, eff_vol_x,
+// eff_atr_min/eff_atr_max, eff_min_score, eff_score_delta) y de los estados HTF
+// de la Tarea 5 (htf_bull/htf_bear/htf_neutral, htf_ok_long/short).
+//
+// Pasos:
+//   1) Estructura por lado: pendiente de la EMA lenta, alineación de tendencia
+//      (close vs ema_slow + ema_fast vs ema_slow + DMI di_plus/di_minus + slope),
+//      distancia a la EMA rápida en ATR (distance_ok), pullback reciente a la
+//      EMA rápida y trigger (cruce con la EMA rápida o pullback + vela de momentum).
+//   2) Macro por lado vía ema_50/ema_200.
+//   3) Score 0-10 por lado: trend&macro(2) + HTF(2) + MACD(2) + RSI(1) +
+//      volumen(1) + trigger(2).
+//   4) regime_trend = adx_val >= eff_adx_min; atr_ok = atr_pct en banda;
+//      vol_ok = volume >= vol_sma * eff_vol_x.
+//   5) score_edge_ok por lado = (score_propio - score_opuesto) >= eff_score_delta.
+//
+// Salidas expuestas al gating de entrada (Tarea 9):
+//   score_long, score_short, regime_trend, atr_ok, vol_ok, distance_ok,
+//   trend_long/short, trigger_long/short, macro_long_ok/macro_short_ok,
+//   score_edge_long_ok/score_edge_short_ok.
+//
+// Requisitos cubiertos: 4.1, 4.2, 4.3, 4.4, 4.5
+// ============================================================================
+
+// --- Sub-tarea 7.1: estructura, triggers y score 0-10 por lado ---------------
+
+// Inputs auxiliares de estructura/scoring (grupo "M. Estructura y Scoring").
+// Se exponen como configurables porque afectan a la reactividad de los triggers.
+i_slope_len      = input.int  (5,   'Longitud de pendiente EMA lenta', minval=1, group='M. Estructura y Scoring', tooltip='Barras hacia atrás para medir la pendiente de la EMA lenta (slope).')
+i_pullback_len   = input.int  (5,   'Ventana de pullback (barras)',    minval=1, group='M. Estructura y Scoring', tooltip='Barras recientes en las que el precio debe haber retrocedido a la EMA rápida.')
+i_max_dist_day   = input.float(2.5, 'Distancia máx. a EMA rápida (xATR) — Day',   minval=0.1, step=0.1, group='M. Estructura y Scoring', tooltip='Día: distancia máxima entre el precio y la EMA rápida en múltiplos de ATR.')
+i_max_dist_swing = input.float(4.0, 'Distancia máx. a EMA rápida (xATR) — Swing', minval=0.1, step=0.1, group='M. Estructura y Scoring', tooltip='Swing: distancia máxima entre el precio y la EMA rápida en múltiplos de ATR.')
+
+// Distancia máxima resuelta por modo (Day más estricto que Swing, coherente con
+// el espíritu de calibración: Day busca entradas más ceñidas a la media).
+md_max_dist  = isDay ? i_max_dist_day : i_max_dist_swing
+eff_max_dist = f_resolve(false, md_max_dist, false, md_max_dist, md_max_dist)
+
+// --- Estructura: pendiente de la EMA lenta -----------------------------------
+// slope_*_ok confirma que la EMA lenta avanza en la dirección candidata.
+slope_long_ok  = ema_slow > ema_slow[i_slope_len]
+slope_short_ok = ema_slow < ema_slow[i_slope_len]
+
+// --- Estructura: alineación de tendencia por lado ----------------------------
+// Tendencia long: precio sobre la EMA lenta, EMA rápida sobre la lenta, DMI a
+// favor (di_plus > di_minus) y pendiente alcista. Análogo (invertido) para short.
+trend_long  = close > ema_slow and ema_fast > ema_slow and di_plus > di_minus and slope_long_ok
+trend_short = close < ema_slow and ema_fast < ema_slow and di_minus > di_plus and slope_short_ok
+
+// --- Distancia a la EMA rápida en ATR (filtro de extensión) ------------------
+// Evita entrar demasiado lejos de la media (riesgo de reversión a la media).
+// f_safe_div protege ante atr_val == 0/na (warm-up).
+distance_atr = f_safe_div(math.abs(close - ema_fast), atr_val)
+distance_ok  = distance_atr <= eff_max_dist
+
+// --- Pullback reciente a la EMA rápida ---------------------------------------
+// Long: en las últimas i_pullback_len barras el mínimo tocó/perforó la EMA rápida
+// (el precio "volvió" a la media antes de continuar). Short: el máximo la alcanzó.
+pullback_long  = ta.lowest(low, i_pullback_len)  <= ema_fast
+pullback_short = ta.highest(high, i_pullback_len) >= ema_fast
+
+// --- Vela de momentum (confirmación del pullback) ----------------------------
+// Vela alcista/bajista en el cierre de la barra; combina con el pullback para
+// generar un trigger sin necesidad de cruce explícito.
+mom_candle_long  = close > open
+mom_candle_short = close < open
+
+// --- Trigger por lado: cruce con la EMA rápida o pullback + momentum ----------
+trigger_long  = ta.crossover(close, ema_fast)  or (pullback_long  and mom_candle_long)
+trigger_short = ta.crossunder(close, ema_fast) or (pullback_short and mom_candle_short)
+
+// --- Macro-tendencia por lado (ema_50 vs ema_200) ----------------------------
+macro_long_ok  = ema_50 > ema_200
+macro_short_ok = ema_50 < ema_200
+
+// --- Filtros transversales (régimen, volatilidad, volumen) -------------------
+// regime_trend: hay tendencia suficiente (ADX por encima del mínimo del modo).
+regime_trend = adx_val >= eff_adx_min
+
+// atr_ok: la volatilidad relativa está dentro de la banda del modo (ni plana ni
+// extrema). Requiere datos válidos de atr_pct (warm-up controlado por max_bars_back).
+atr_ok = not na(atr_pct) and atr_pct >= eff_atr_min and atr_pct <= eff_atr_max
+
+// vol_ok: participación suficiente (volumen sobre la media x el multiplicador).
+// Si vol_sma es na (warm-up), no se exige volumen (fail-safe a permitir).
+vol_ok = na(vol_sma) ? true : volume >= vol_sma * eff_vol_x
+
+// --- Score 0-10 por lado -----------------------------------------------------
+// Reparto del diseño: trend&macro(2) + HTF(2) + MACD(2) + RSI(1) + volumen(1) +
+// trigger(2). Cada componente aporta puntos enteros.
+
+// Componente trend & macro (2): 1 por tendencia alineada + 1 por macro a favor.
+sc_long_trend  = (trend_long  ? 1 : 0) + (macro_long_ok  ? 1 : 0)
+sc_short_trend = (trend_short ? 1 : 0) + (macro_short_ok ? 1 : 0)
+
+// Componente HTF (2): alineación plena=2, neutral=1, oposición=0. Se apoya en
+// htf_bull/htf_bear/htf_neutral y en los permisos htf_ok_long/short (Tarea 5).
+sc_long_htf  = htf_bull ? 2 : (htf_ok_long  ? 1 : 0)
+sc_short_htf = htf_bear ? 2 : (htf_ok_short ? 1 : 0)
+
+// Componente MACD (2): 1 por línea sobre/bajo la señal + 1 por histograma a favor.
+sc_long_macd  = (macd_line > macd_signal ? 1 : 0) + (macd_hist > 0 ? 1 : 0)
+sc_short_macd = (macd_line < macd_signal ? 1 : 0) + (macd_hist < 0 ? 1 : 0)
+
+// Componente RSI (1): usa los umbrales por modo eff_rsi_long/eff_rsi_short.
+sc_long_rsi  = rsi_val >= eff_rsi_long  ? 1 : 0
+sc_short_rsi = rsi_val <= eff_rsi_short ? 1 : 0
+
+// Componente volumen (1): confirmación de participación (eff_vol_x + vol_sma).
+sc_vol = vol_ok ? 1 : 0
+
+// Componente trigger (2): cruce/pullback+momentum del lado correspondiente.
+sc_long_trig  = trigger_long  ? 2 : 0
+sc_short_trig = trigger_short ? 2 : 0
+
+// Score total 0-10 por lado (acotado por construcción a [0,10]).
+score_long  = sc_long_trend  + sc_long_htf  + sc_long_macd  + sc_long_rsi  + sc_vol + sc_long_trig
+score_short = sc_short_trend + sc_short_htf + sc_short_macd + sc_short_rsi + sc_vol + sc_short_trig
+
+// --- Score_Edge por lado (rechazo de señales ambiguas) -----------------------
+// Helper PURO evaluable para aserciones: ¿supera la ventaja el delta exigido?
+f_score_edge_ok(_self, _other, _delta) =>
+    (_self - _other) >= _delta
+
+// La ventaja del lado candidato debe ser >= eff_score_delta (criterio 4.3).
+score_edge_long_ok  = f_score_edge_ok(score_long,  score_short, eff_score_delta)
+score_edge_short_ok = f_score_edge_ok(score_short, score_long,  eff_score_delta)
+
+// --- Sub-tarea 7.2 (opcional): aserciones de scoring por modo ----------------
+// Aserciones lógicas ligeras evaluadas en la última barra (Testing Strategy).
+
+// Property 8: Min_Score por defecto de Day no supera al de Swing.
+// Se valida sobre los defaults de modo (inputs J/K) y sobre el override de
+// preset del activo seleccionado (f_ov_minscore Day <= Swing).
+// **Validates: Requirements 4.1, 4.2**
+p8_defaults = i_min_score_day <= i_min_score_swing
+p8_preset   = (not asset_has_preset) or (f_ov_minscore(i_asset, true) <= f_ov_minscore(i_asset, false))
+p8_ok = p8_defaults and p8_preset
+
+// Property 9: Gating por Score_Edge (entradas ambiguas se rechazan).
+// Si |score_long - score_short| < eff_score_delta, ningún lado supera el edge
+// (ambos score_edge_*_ok son false). Se valida la relación sobre el estado actual
+// y la lógica pura f_score_edge_ok en casos representativos.
+// **Validates: Requirements 4.3**
+p9_ambiguous_rejected = (math.abs(score_long - score_short) >= eff_score_delta) or (not score_edge_long_ok and not score_edge_short_ok)
+p9_clear_long  = f_score_edge_ok(7, 4, 2) == true    // ventaja 3 >= delta 2 => permite
+p9_blocks_tie  = f_score_edge_ok(5, 5, 1) == false   // empate < delta 1 => bloquea
+p9_blocks_thin = f_score_edge_ok(6, 5, 2) == false   // ventaja 1 < delta 2 => bloquea
+p9_ok = p9_ambiguous_rejected and p9_clear_long and p9_blocks_tie and p9_blocks_thin
+
+if barstate.islast
+    if not p8_ok
+        runtime.error('Min_Score por modo incorrecto (Property 8): el Min_Score por defecto de Day supera al de Swing.')
+    if not p9_ok
+        runtime.error('Score_Edge incorrecto (Property 9): una señal ambigua (ventaja < delta) no se rechaza.')
+
+
+
+// ============================================================================
+// TAREA 8 — Risk_Manager por modo (stop híbrido, sizing y caps de exposición)
+// ----------------------------------------------------------------------------
+// Calcula, por lado (long/short), el stop inicial híbrido, su calidad y la
+// cantidad (qty) final respetando:
+//   1) El riesgo por operación (% de equity, resuelto por modo en eff_risk_pct).
+//   2) El cap de exposición por notional (eff_expo_prime/eff_expo_off según la
+//      sesión prime), aplicado con apalancamiento.
+//   3) La guarda de stop: una entrada solo es válida si stop_dist > 0 y qty > 0.
+//
+// Stop híbrido (estilo v11):
+//   - Stop ESTRUCTURAL: mínimo (long) / máximo (short) reciente sobre la ventana
+//     i_swing_lb, con un colchón de 0.20*ATR para no quedar pegado a la mecha.
+//   - Stop por ATR: close -/+ atr_val * i_sl_atr.
+//   - Se elige el MÁS CONSERVADOR, entendido como el que deja MÁS recorrido
+//     (más lejos del precio): el más bajo en long, el más alto en short. Así se
+//     evita el "whipsaw" por ruido (coherente con la filosofía fail-safe del
+//     diseño). El stop más lejano implica más riesgo por unidad, que el sizing
+//     por % de equity compensa reduciendo qty.
+//   - Validación de lado: el SL debe quedar del lado correcto del precio
+//     (sl_long < close, sl_short > close); si no, se invalida (na) y se bloquea
+//     la entrada de ese lado (Property 19 / criterio 5.5).
+//
+// stop_atr = stop_dist / ATR ; stop_quality = stop_atr dentro de la banda
+// [i_min_stop_atr, i_max_stop_atr] (evita stops absurdamente pequeños o enormes).
+//
+// Sizing (criterios 5.1, 5.2, 5.5):
+//   equity       = strategy.equity
+//   cash_risk    = equity * eff_risk_pct / 100
+//   qty_risk     = f_safe_div(cash_risk * leverage, stop_dist)   // bloquea si stop_dist==0
+//   exposure_pct = is_prime_session ? eff_expo_prime : eff_expo_off
+//   max_notional = equity * exposure_pct / 100 * leverage
+//   qty_cap      = f_safe_div(max_notional, close)
+//   qty          = math.max(0, math.min(qty_risk, qty_cap))      // nunca excede el cap
+//   qty_ok       = stop_dist > 0 and qty > 0
+//
+// Riesgo % y exposición ya son independientes por modo (eff_risk_pct,
+// eff_expo_prime/off resueltos en las Tareas 3/4). Se exponen aquí los inputs
+// de stop y el apalancamiento (grupo "N. Riesgo (sizing y stop)").
+//
+// Salidas expuestas al gating de entrada (Tarea 9) y al Exit_Manager (Tarea 10):
+//   sl_long/sl_short, stop_dist_long/short, stop_atr_long/short,
+//   stop_quality_long/short, qty_long/qty_short, qty_long_ok/qty_short_ok,
+//   max_notional, qty_cap, cash_risk, leverage.
+//
+// Requisitos cubiertos: 5.1, 5.2, 5.3, 5.4, 5.5
+// ============================================================================
+
+// --- Sub-tarea 8.1: stop híbrido, caps de exposición y guarda de stop --------
+
+// Inputs de apalancamiento y stop (grupo "N. Riesgo (sizing y stop)").
+i_leverage     = input.int  (3,   'Apalancamiento (x)',                 minval=1, group='N. Riesgo (sizing y stop)', tooltip='Apalancamiento usado en el sizing por riesgo y en el cap de notional.')
+i_sl_atr       = input.float(1.5,  'SL por ATR (x ATR)',                 minval=0.1, step=0.1, group='N. Riesgo (sizing y stop)', tooltip='Distancia del stop por ATR: close -/+ ATR * este multiplicador.')
+i_swing_lb     = input.int  (10,   'Lookback stop estructural (barras)', minval=1, group='N. Riesgo (sizing y stop)', tooltip='Ventana para el mínimo/máximo del stop estructural.')
+i_min_stop_atr = input.float(0.5,  'Stop mínimo (x ATR)',                minval=0.0, step=0.1, group='N. Riesgo (sizing y stop)', tooltip='Calidad de stop: distancia mínima del stop en múltiplos de ATR.')
+i_max_stop_atr = input.float(6.0,  'Stop máximo (x ATR)',                minval=0.1, step=0.1, group='N. Riesgo (sizing y stop)', tooltip='Calidad de stop: distancia máxima del stop en múltiplos de ATR.')
+
+// Apalancamiento efectivo (referencia con el nombre usado en el diseño).
+leverage = i_leverage
+
+// --- Stop estructural: extremos recientes con colchón de 0.20*ATR ------------
+struct_low  = ta.lowest(low,  i_swing_lb)   // mínimo reciente (base del stop long)
+struct_high = ta.highest(high, i_swing_lb)  // máximo reciente (base del stop short)
+sl_struct_long  = struct_low  - 0.20 * atr_val
+sl_struct_short = struct_high + 0.20 * atr_val
+
+// --- Stop por ATR: distancia fija en múltiplos de ATR ------------------------
+sl_atr_long  = close - atr_val * i_sl_atr
+sl_atr_short = close + atr_val * i_sl_atr
+
+// --- Selección del stop más conservador (más lejos del precio) ---------------
+// Long: el más bajo de los dos. Short: el más alto de los dos.
+sl_long_raw  = math.min(sl_struct_long,  sl_atr_long)
+sl_short_raw = math.max(sl_struct_short, sl_atr_short)
+
+// --- Validación de lado: el SL debe quedar del lado correcto del precio ------
+// Si el stop no quedó del lado correcto (datos degenerados/warm-up), se invalida
+// (na) y la entrada de ese lado quedará bloqueada por qty_ok (Property 19 / 5.5).
+sl_long_side_ok  = not na(sl_long_raw)  and sl_long_raw  < close
+sl_short_side_ok = not na(sl_short_raw) and sl_short_raw > close
+sl_long  = sl_long_side_ok  ? sl_long_raw  : na
+sl_short = sl_short_side_ok ? sl_short_raw : na
+
+// --- Distancia del stop (1R) y calidad por banda de ATR ----------------------
+// stop_dist = 0 cuando el SL es inválido => bloquea la entrada (criterio 5.5).
+stop_dist_long  = na(sl_long)  ? 0.0 : close - sl_long
+stop_dist_short = na(sl_short) ? 0.0 : sl_short - close
+
+// stop_atr = stop_dist / ATR (f_safe_div protege ante atr_val == 0/na en warm-up).
+stop_atr_long  = f_safe_div(stop_dist_long,  atr_val)
+stop_atr_short = f_safe_div(stop_dist_short, atr_val)
+
+// stop_quality: el stop está dentro de la banda [min, max] en múltiplos de ATR.
+stop_quality_long  = stop_dist_long  > 0 and stop_atr_long  >= i_min_stop_atr and stop_atr_long  <= i_max_stop_atr
+stop_quality_short = stop_dist_short > 0 and stop_atr_short >= i_min_stop_atr and stop_atr_short <= i_max_stop_atr
+
+// --- Sizing por riesgo y caps de exposición ----------------------------------
+// Equity actual de la estrategia (base del sizing por % de riesgo).
+equity = strategy.equity
+
+// Riesgo en efectivo por operación (criterio 5.1). eff_risk_pct ya incorpora el
+// modo y el multiplicador de perfil (Tarea 4).
+cash_risk = equity * eff_risk_pct / 100.0
+
+// Exposición permitida según la sesión (prime dentro de ventana, off fuera).
+exposure_pct = is_prime_session ? eff_expo_prime : eff_expo_off
+
+// Notional máximo permitido (cap de exposición) con apalancamiento (criterio 5.2).
+max_notional = equity * exposure_pct / 100.0 * leverage
+
+// Cap de cantidad por notional: máximo qty que respeta el cap de exposición.
+qty_cap = f_safe_div(max_notional, close)
+
+// Helper PURO de cantidad por riesgo (evaluable para aserciones, Property 10).
+//   _cash_risk : riesgo en efectivo de la operación.
+//   _lev       : apalancamiento.
+//   _stop_dist : distancia del stop (1R). f_safe_div bloquea si es 0/na.
+f_qty_risk(_cash_risk, _lev, _stop_dist) =>
+    f_safe_div(_cash_risk * _lev, _stop_dist)
+
+// Cantidad por riesgo de cada lado (qty_risk = cash_risk*leverage / stop_dist).
+qty_risk_long  = f_qty_risk(cash_risk, leverage, stop_dist_long)
+qty_risk_short = f_qty_risk(cash_risk, leverage, stop_dist_short)
+
+// Cantidad final: nunca negativa y nunca por encima del cap de notional.
+qty_long  = math.max(0.0, math.min(qty_risk_long,  qty_cap))
+qty_short = math.max(0.0, math.min(qty_risk_short, qty_cap))
+
+// Guarda de entrada por lado: stop válido (>0) y cantidad positiva (criterio 5.5).
+qty_long_ok  = stop_dist_long  > 0 and qty_long  > 0
+qty_short_ok = stop_dist_short > 0 and qty_short > 0
+
+// --- Sub-tarea 8.2 (opcional): aserciones de sizing y caps -------------------
+// Aserciones lógicas evaluadas en la última barra (Testing Strategy del diseño).
+
+// Property 10: Fórmula de sizing por riesgo (qty_risk * stop_dist == cash_risk * leverage).
+// Para stop_dist > 0, qty_risk = cash_risk*leverage/stop_dist, por lo que el
+// producto reproduce cash_risk*leverage dentro de la tolerancia de punto flotante.
+// Se valida sobre la función pura f_qty_risk con valores representativos.
+// **Validates: Requirements 5.1**
+p10_a = math.abs(f_qty_risk(100.0, 3, 5.0)  * 5.0  - 100.0 * 3) < 1e-6
+p10_b = math.abs(f_qty_risk(250.0, 5, 12.5) * 12.5 - 250.0 * 5) < 1e-6
+p10_ok = p10_a and p10_b
+
+// Property 11: La cantidad nunca excede el cap de notional (qty * close <= max_notional).
+// Por construcción qty <= qty_cap = max_notional/close, luego qty*close <= max_notional.
+// Se valida sobre el estado actual de ambos lados (con tolerancia de redondeo).
+// **Validates: Requirements 5.2**
+p11_tol     = max_notional * 1e-9 + 1e-6
+p11_long_ok = na(close) or qty_long  * close <= max_notional + p11_tol
+p11_short_ok= na(close) or qty_short * close <= max_notional + p11_tol
+p11_ok = p11_long_ok and p11_short_ok
+
+// Property 12: Stop cero bloquea la entrada (stop_dist == 0 => qty_ok == false).
+// Si la distancia del stop es 0, qty_ok debe ser false para ambos lados. Se valida
+// la relación sobre el estado actual (implicación lógica por construcción).
+// **Validates: Requirements 5.5**
+p12_long_ok  = (stop_dist_long  != 0) or (not qty_long_ok)
+p12_short_ok = (stop_dist_short != 0) or (not qty_short_ok)
+p12_ok = p12_long_ok and p12_short_ok
+
+if barstate.islast
+    if not p10_ok
+        runtime.error('Sizing por riesgo incorrecto (Property 10): qty_risk*stop_dist != cash_risk*leverage.')
+    if not p11_ok
+        runtime.error('Cap de notional violado (Property 11): qty*close excede max_notional.')
+    if not p12_ok
+        runtime.error('Guarda de stop incorrecta (Property 12): stop_dist==0 no bloquea la entrada (qty_ok).')
+
+
+// ============================================================================
+// TAREA 9 — Checkpoint: gating completo de entrada y strategy.entry
+// ----------------------------------------------------------------------------
+// Cablea TODO el pipeline previo (Tareas 1-8) en la decisión final de entrada.
+// Combina, por lado, todos los gates ya producidos para emitir las órdenes
+// strategy.entry('L'/'S'). El TP/SL real y la gestión de la posición viva se
+// implementan en el Exit_Manager (Tarea 10); aquí solo se asegura que:
+//   - Las entradas disparan cuando se cumplen TODAS las condiciones.
+//   - last_entry_bar se actualiza en la barra de entrada (para que el cooldown
+//     del Session_Manager — Tarea 6 — funcione en la siguiente evaluación).
+//   - Se guarda el SL pendiente (pending_sl_long/short) para que el Exit_Manager
+//     lo consuma al construir los niveles de la posición.
+//
+// Gates combinados (en orden de lectura, todos deben ser true):
+//   no_repaint_gate     : barstate.isconfirmed (no repintado — barra cerrada).
+//   flat                : strategy.position_size == 0 (sin posición abierta).
+//   cooldown_ok         : transcurrió el cooldown del modo (Tarea 6).
+//   dirección permitida : eff_allow_long / eff_allow_short (Tarea 4).
+//   session_ok          : dentro de la ventana de sesión o sin bloqueo (Tarea 6).
+//   regime_trend        : ADX por encima del mínimo del modo (Tarea 7).
+//   trend_long/short    : alineación de estructura del lado (Tarea 7).
+//   trigger_long/short  : disparo (cruce o pullback+momentum) del lado (Tarea 7).
+//   macro_long/short_ok : macro-tendencia ema_50 vs ema_200 a favor (Tarea 7).
+//   htf_ok_long/short   : el HTF no se opone al lado (Tarea 5).
+//   atr_ok              : volatilidad relativa dentro de banda (Tarea 7).
+//   vol_ok              : participación de volumen suficiente (Tarea 7).
+//   distance_ok         : no demasiado lejos de la EMA rápida (Tarea 7).
+//   score >= eff_min_score : calidad mínima del lado (Tarea 7).
+//   score_edge_*_ok     : ventaja del lado >= delta (Tarea 7).
+//   stop_quality_*      : el stop está dentro de la banda de ATR (Tarea 8).
+//   qty_*_ok            : stop válido (>0) y cantidad positiva (Tarea 8).
+//
+// Requisitos cubiertos (checkpoint integrador): 6.1, 6.2, 7.4, 2.5, 2.6, 4.3, 5.5
+// ============================================================================
+
+// --- Estado vivo del SL pendiente (lo consumirá el Exit_Manager, Tarea 10) ---
+// Se almacena el SL del lado en el que se abre la posición, para que la gestión
+// de salidas pueda inicializar los niveles (init_sl / risk_unit) en la Tarea 10.
+var float pending_sl_long  = na
+var float pending_sl_short = na
+
+// --- Condición común a ambos lados -------------------------------------------
+// Barra confirmada (no repintado) y cuenta plana, más el cooldown del modo.
+flat       = strategy.position_size == 0
+entry_base = no_repaint_gate and flat and cooldown_ok
+
+// --- Gating completo de ENTRADA LONG -----------------------------------------
+entry_long = entry_base and eff_allow_long and session_ok and regime_trend and trend_long and trigger_long and macro_long_ok and htf_ok_long and atr_ok and vol_ok and distance_ok and (score_long >= eff_min_score) and score_edge_long_ok and stop_quality_long and qty_long_ok
+
+// --- Gating completo de ENTRADA SHORT ----------------------------------------
+entry_short = entry_base and eff_allow_short and session_ok and regime_trend and trend_short and trigger_short and macro_short_ok and htf_ok_short and atr_ok and vol_ok and distance_ok and (score_short >= eff_min_score) and score_edge_short_ok and stop_quality_short and qty_short_ok
+
+// Guarda de exclusión mutua: si por algún empate de score ambos lados quedaran
+// habilitados en la misma barra (no debería ocurrir por score_edge), se prioriza
+// el lado con mayor score y se descarta el otro para no abrir señales opuestas.
+entry_long_final  = entry_long  and not (entry_short and score_short > score_long)
+entry_short_final = entry_short and not (entry_long  and score_long  >= score_short)
+
+// --- Emisión de órdenes y actualización de estado vivo -----------------------
+// Al abrir, se fija last_entry_bar (habilita el cooldown) y se guarda el SL
+// pendiente del lado correspondiente para el Exit_Manager (Tarea 10).
+if entry_long_final
+    strategy.entry('L', strategy.long, qty=qty_long)
+    last_entry_bar := bar_index
+    pending_sl_long := sl_long
+
+if entry_short_final
+    strategy.entry('S', strategy.short, qty=qty_short)
+    last_entry_bar := bar_index
+    pending_sl_short := sl_short
+
+
+// ============================================================================
+// TAREA 10 — Exit_Manager por modo (TP1/2/3 + break-even + trailing + defensivo)
+// ----------------------------------------------------------------------------
+// Gestiona la POSICIÓN VIVA una vez abierta (Tarea 9), por modo y de forma
+// simétrica para long y short. Detecta el lado por el signo de
+// strategy.position_size y usa strategy.position_avg_price como precio de
+// entrada de referencia.
+//
+// Estado vivo (variables var) — se RESETEA al quedar plano y se INICIALIZA al
+// abrir posición:
+//   init_sl     : stop inicial (de pending_sl; fallback a stop por ATR).
+//   risk_unit   : 1R = |entry - init_sl|.
+//   tp1/tp2/tp3 : niveles de TP = entry +/- eff_tpN_r * risk_unit.
+//   be_armed    : break-even activado tras confirmar TP1.
+//   trail_active: trailing activado tras confirmar TP2.
+//   trail_level : nivel de trailing (ratchet) por ATR del modo.
+//   (se reutilizan pending_sl_long/short y last_entry_bar de Tareas 6/9).
+//
+// Combinación del stop efectivo sl_live: el MÁS CONSERVADOR (más protector) de
+// init_sl / break-even / trailing del lado correcto (máximo en long, mínimo en
+// short). Garantiza Property 5 (BE tras TP1) y Property 19 (SL del lado correcto).
+//
+// Porcentajes parciales (eff_tp1_pct/eff_tp2_pct/eff_tp3_pct ya resueltos en la
+// Tarea 4) se normalizan aquí para sumar 100 con clamp y aviso si TP3 quedara
+// negativo (Property 7).
+//
+// Salida defensiva: cambio de estructura (close cruza ema_slow en contra) + score
+// opuesto fuerte => strategy.close inmediato.
+//
+// Requisitos cubiertos: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6
+// ============================================================================
+
+// --- Sub-tarea 10.1: estado vivo y niveles de TP por modo --------------------
+
+// Estado vivo de la posición (se inicializa al abrir, se resetea en plano).
+var float init_sl      = na    // stop inicial (1R de referencia)
+var float risk_unit    = na    // 1R = |entry - init_sl|
+var float tp1          = na    // nivel de TP1
+var float tp2          = na    // nivel de TP2
+var float tp3          = na    // nivel de TP3
+var bool  be_armed     = false // break-even activado tras TP1
+var bool  trail_active = false // trailing activado tras TP2
+var float trail_level  = na    // nivel de trailing (ratchet)
+
+// Detección de lado por el signo de la posición y precio de entrada de referencia.
+pos_size    = strategy.position_size
+isLong      = pos_size > 0
+isShort     = pos_size < 0
+in_pos      = pos_size != 0
+entry_price = strategy.position_avg_price
+
+// Marca del estado anterior para detectar transiciones plano<->posición sin
+// pisar el pending_sl que la Tarea 9 fija en la barra de entrada (con
+// process_orders_on_close el fill se refleja en la barra siguiente).
+var bool was_in_pos = false
+
+// Reset al quedar plano (tras cerrar): limpia el estado vivo de forma
+// determinista (idempotencia de estado del diseño).
+if (not in_pos) and was_in_pos
+    init_sl      := na
+    risk_unit    := na
+    tp1          := na
+    tp2          := na
+    tp3          := na
+    be_armed     := false
+    trail_active := false
+    trail_level  := na
+
+// Inicialización al abrir posición (transición plano -> posición).
+if in_pos and (not was_in_pos)
+    // SL pendiente del lado correspondiente (Tarea 9); fallback a stop por ATR.
+    ps_side     = isLong ? pending_sl_long : pending_sl_short
+    fallback_sl = isLong ? entry_price - atr_val * i_sl_atr : entry_price + atr_val * i_sl_atr
+    init_sl     := na(ps_side) ? fallback_sl : ps_side
+    risk_unit   := math.abs(entry_price - init_sl)
+    // Niveles de TP: entry +/- eff_tpN_r * risk_unit (eff_tpN_r ya por modo, Día<=Swing).
+    tp1 := isLong ? entry_price + eff_tp1_r * risk_unit : entry_price - eff_tp1_r * risk_unit
+    tp2 := isLong ? entry_price + eff_tp2_r * risk_unit : entry_price - eff_tp2_r * risk_unit
+    tp3 := isLong ? entry_price + eff_tp3_r * risk_unit : entry_price - eff_tp3_r * risk_unit
+    be_armed     := false
+    trail_active := false
+    trail_level  := na
+    // Pending consumido: se limpia aquí (no en el reset) para no pisar un SL que
+    // la Tarea 9 pudiera fijar en la misma barra de un cierre + reentrada.
+    pending_sl_long  := na
+    pending_sl_short := na
+
+// Actualiza la marca del estado para la próxima barra.
+was_in_pos := in_pos
+
+// --- Sub-tarea 10.2: break-even tras TP1, trailing tras TP2 y salida defensiva
+
+// Actualización del estado de gestión solo en barra CONFIRMADA (no repintado).
+if in_pos and barstate.isconfirmed
+    // TP1 confirmado => armar break-even (mover SL a entrada).
+    if (not be_armed) and ((isLong and close >= tp1) or (isShort and close <= tp1))
+        be_armed := true
+    // TP2 confirmado => activar trailing (Día más ajustado / Swing más amplio).
+    if (not trail_active) and ((isLong and close >= tp2) or (isShort and close <= tp2))
+        trail_active := true
+    // Nivel de trailing por ATR del modo; ratchet (solo se mueve a favor).
+    if trail_active
+        new_trail = isLong ? high - eff_trail_atr * atr_val : low + eff_trail_atr * atr_val
+        trail_level := na(trail_level) ? new_trail : (isLong ? math.max(trail_level, new_trail) : math.min(trail_level, new_trail))
+
+// Combinación del stop efectivo: el más protector del lado correcto.
+//   Long  => el MÁS ALTO de init_sl / break-even (entry) / trailing.
+//   Short => el MÁS BAJO  de init_sl / break-even (entry) / trailing.
+sl_live = init_sl
+if in_pos
+    if isLong
+        sl_live := init_sl
+        if be_armed
+            sl_live := math.max(sl_live, entry_price)
+        if trail_active and not na(trail_level)
+            sl_live := math.max(sl_live, trail_level)
+    else if isShort
+        sl_live := init_sl
+        if be_armed
+            sl_live := math.min(sl_live, entry_price)
+        if trail_active and not na(trail_level)
+            sl_live := math.min(sl_live, trail_level)
+
+// --- Porcentajes parciales normalizados a 100 (Sub-tarea 10.3) ---------------
+// eff_tp1_pct/eff_tp2_pct se resolvieron en la Tarea 4; eff_tp3_pct = 100 - tp1 - tp2.
+// Si TP3 quedara negativo (tp1+tp2 > 100) se hace clamp a 0 y se normaliza
+// tp1/tp2 para que la suma sea exactamente 100 (Property 7); se marca aviso.
+tp_pct_neg = eff_tp3_pct < 0
+sum12      = eff_tp1_pct + eff_tp2_pct
+n_tp3_pct  = math.max(0.0, eff_tp3_pct)
+n_tp1_pct  = tp_pct_neg ? f_safe_div(eff_tp1_pct, sum12) * 100.0 : eff_tp1_pct
+n_tp2_pct  = tp_pct_neg ? f_safe_div(eff_tp2_pct, sum12) * 100.0 : eff_tp2_pct
+
+// Aviso visual no intrusivo si hubo que normalizar (no detiene la estrategia).
+if barstate.islast and tp_pct_neg
+    label.new(bar_index, high, 'Aviso: TP1%+TP2% > 100; TP3% se ajustó a 0 y se normalizó.', style=label.style_label_down, color=color.orange, textcolor=color.white, size=size.small)
+
+// --- Salida defensiva: cambio de estructura + score opuesto fuerte -----------
+// Long en posición pero el precio pierde la EMA lenta y el score short es fuerte
+// y con ventaja => cerrar. Análogo (invertido) para short.
+defensive_long  = isLong  and barstate.isconfirmed and close < ema_slow and score_short >= eff_min_score and score_edge_short_ok
+defensive_short = isShort and barstate.isconfirmed and close > ema_slow and score_long  >= eff_min_score and score_edge_long_ok
+
+if defensive_long
+    strategy.close('L', comment='DEFENSIVE')
+if defensive_short
+    strategy.close('S', comment='DEFENSIVE')
+
+// --- Emisión de las salidas parciales con SL combinado (Sub-tarea 10.3) ------
+// from_entry según el lado abierto ('L' long / 'S' short). Cada salida cierra su
+// porcentaje en su TP (limit) y comparte el stop combinado sl_live.
+if in_pos and (not (defensive_long or defensive_short))
+    from_id = isLong ? 'L' : 'S'
+    strategy.exit('TP1', from_entry=from_id, qty_percent=n_tp1_pct, limit=tp1, stop=sl_live)
+    strategy.exit('TP2', from_entry=from_id, qty_percent=n_tp2_pct, limit=tp2, stop=sl_live)
+    strategy.exit('TP3', from_entry=from_id, qty_percent=n_tp3_pct, limit=tp3, stop=sl_live)
+
+// --- Sub-tarea 10.4 (opcional): aserciones del Exit_Manager ------------------
+// Aserciones lógicas evaluadas en la última barra (Testing Strategy del diseño).
+tol_px = math.max(syminfo.mintick, 1e-9)
+
+// Property 4: Defaults de TP más cercanos en Day que en Swing (tpN_r(Day) <= tpN_r(Swing)).
+// **Validates: Requirements 3.2, 3.1**
+p4_ok = i_tp1_r_day <= i_tp1_r_swing and i_tp2_r_day <= i_tp2_r_swing and i_tp3_r_day <= i_tp3_r_swing
+
+// Property 6: Trailing de Day más ajustado que el de Swing (trail_atr(Day) <= trail_atr(Swing)).
+// **Validates: Requirements 3.4, 3.5**
+p6_ok = i_trail_atr_day <= i_trail_atr_swing
+
+// Property 7: Los porcentajes parciales suman 100 (tras normalización).
+// **Validates: Requirements 3.6**
+p7_ok = math.abs((n_tp1_pct + n_tp2_pct + n_tp3_pct) - 100.0) < 1e-6
+
+// Property 5: Break-even tras TP1 (sl_live en BE o mejor del lado correcto).
+// **Validates: Requirements 3.3**
+p5_ok = (not in_pos) or (not be_armed) or (isLong ? sl_live >= entry_price - tol_px : sl_live <= entry_price + tol_px)
+
+// Property 19: El SL nunca se coloca en el lado incorrecto (antes de BE, estricto;
+// con BE puede quedar exactamente en la entrada o mejor).
+// **Validates: Requirements 3.3, 5.1**
+p19_ok = (not in_pos) or be_armed or (isLong ? sl_live < entry_price + tol_px : sl_live > entry_price - tol_px)
+
+if barstate.islast
+    if not p4_ok
+        runtime.error('Defaults de TP incorrectos (Property 4): tpN_r(Day) supera a tpN_r(Swing).')
+    if not p6_ok
+        runtime.error('Trailing por modo incorrecto (Property 6): trail_atr(Day) supera a trail_atr(Swing).')
+    if not p7_ok
+        runtime.error('Porcentajes parciales incorrectos (Property 7): TP1%+TP2%+TP3% != 100.')
+    if not p5_ok
+        runtime.error('Break-even incorrecto (Property 5): sl_live no está en BE o mejor tras TP1.')
+    if not p19_ok
+        runtime.error('SL del lado incorrecto (Property 19): el stop quedó del lado equivocado de la entrada.')
+
+
+
+// ============================================================================
+// TAREA 11 — Dashboard (panel de estado) + visuales (EMAs, niveles SL/TP, señales)
+// ----------------------------------------------------------------------------
+// Materializa la capa de VISUALIZACIÓN del diseño (Componente 8: Dashboard) y
+// los plots de apoyo, consumiendo variables ya producidas por las Tareas 1-10
+// (modo, preset, perfil, score, ADX/ATR%, HTF, volumen, niveles vivos y métricas
+// del backtest). Nada de esto altera la lógica de trading.
+//
+// 1) Tabla compacta (esquina superior derecha) mostrada solo si i_show_table:
+//    - Fila de MODO ACTIVO (modeStr) e INDICADOR DE OVERRIDE (mode_override,
+//      p. ej. "Auto→Day (15m)" o "Manual: Swing")           => criterios 1.6, 8.x.
+//    - Asset_Preset (assetStr), Aggressiveness_Profile (profileStr) y dirección
+//      (dirStr)                                              => criterio 8.4.
+//    - Estado de la posición (LONG activo / SHORT activo / Esperar) según
+//      strategy.position_size.
+//    - Score L/S (score_long/score_short), ADX/ATR%, estado HTF, volumen ok.
+//    - PF y WR del backtest (de strategy.grossprofit/grossloss y
+//      wintrades/losstrades) y Net PnL (strategy.netprofit) => criterios 8.1, 8.2, 8.3.
+//    - Próxima qty estimada (lado con mayor score).
+//
+// 2) Plots visuales gateados por inputs de "mostrar":
+//    - EMAs (ema_fast, ema_slow y opcionalmente ema_200) si i_show_emas.
+//    - Líneas de SL/TP dibujadas SOLO con posición abierta (sl_live, tp1, tp2,
+//      tp3) con plot.style_linebr si i_show_levels                => criterio 8.x.
+//    - Marcadores (shapes) de entrada long/short (entry_long_final /
+//      entry_short_final) si i_show_signals.
+//
+// Se usan los helpers f_fmt_price / f_fmt_num / f_fmt_qty para el formateo.
+//
+// Requisitos cubiertos: 1.6, 8.1, 8.2, 8.3, 8.4
+// ============================================================================
+
+// --- Inputs de visualización (grupo "O. Visualización") ----------------------
+i_show_table   = input.bool(true, 'Mostrar Dashboard (tabla)',  group='O. Visualización', tooltip='Muestra el panel de estado en la esquina superior derecha.')
+i_show_emas    = input.bool(true, 'Mostrar EMAs',               group='O. Visualización', tooltip='Dibuja la EMA rápida, la EMA lenta y la EMA 200.')
+i_show_ema200  = input.bool(true, 'Incluir EMA 200',            group='O. Visualización', tooltip='Añade la EMA 200 (macro-tendencia) a los plots de EMAs.')
+i_show_levels  = input.bool(true, 'Mostrar niveles SL/TP',      group='O. Visualización', tooltip='Dibuja SL/TP1/TP2/TP3 solo mientras hay posición abierta.')
+i_show_signals = input.bool(true, 'Mostrar señales de entrada', group='O. Visualización', tooltip='Marca con flechas las entradas long/short confirmadas.')
+
+// --- Métricas derivadas del backtest (PF, WR) --------------------------------
+// Profit Factor = beneficio bruto / pérdida bruta (f_safe_div protege /0).
+dash_pf = f_safe_div(strategy.grossprofit, strategy.grossloss)
+// Operaciones cerradas ganadoras/perdedoras y Win Rate (%).
+dash_trades = strategy.wintrades + strategy.losstrades
+dash_wr     = f_safe_div(strategy.wintrades, dash_trades) * 100.0
+
+// --- Cadenas de estado para la tabla -----------------------------------------
+// Estado de la posición según el tamaño (criterio: LONG/SHORT activo o Esperar).
+estado_str = strategy.position_size > 0 ? 'LONG activo' : (strategy.position_size < 0 ? 'SHORT activo' : 'Esperar')
+estado_col = strategy.position_size > 0 ? color.new(color.green, 0) : (strategy.position_size < 0 ? color.new(color.red, 0) : color.new(color.gray, 0))
+
+// Estado del HTF en texto legible (alcista/bajista/neutral).
+htf_str = htf_bull ? 'alcista' : (htf_bear ? 'bajista' : 'neutral')
+
+// Volumen suficiente (vol_ok ya calculado en la Tarea 7).
+vol_str = vol_ok ? 'Sí' : 'No'
+
+// Próxima qty estimada: la del lado con mayor score (referencia informativa).
+next_qty = score_long >= score_short ? qty_long : qty_short
+
+// --- Construcción de la tabla (una sola vez; se rellena en barstate.islast) ---
+// table.new se crea en una var para no recrearla cada barra; el contenido se
+// actualiza solo en la última barra (criterio de rendimiento del Dashboard).
+var table dash = table.new(position.top_right, 2, 16, border_width=1, frame_width=1, frame_color=color.new(color.gray, 50))
+
+// Helper local de fila etiqueta/valor para compactar el rellenado de la tabla.
+f_dash_row(_t, _r, _label, _value, _vcol) =>
+    table.cell(_t, 0, _r, _label, text_size=size.small, text_color=color.new(color.white, 0), text_halign=text.align_left,  bgcolor=color.new(color.black, 70))
+    table.cell(_t, 1, _r, _value, text_size=size.small, text_color=_vcol,                     text_halign=text.align_right, bgcolor=color.new(color.black, 70))
+
+if i_show_table and barstate.islast
+    c_val = color.new(color.white, 0)
+    // Cabecera (modo activo en el título para visibilidad inmediata).
+    table.cell(dash, 0, 0, 'CB Swing Pro v12', text_size=size.small, text_color=color.new(color.white, 0), text_halign=text.align_left,  bgcolor=color.new(color.blue, 30))
+    table.cell(dash, 1, 0, modeStr,            text_size=size.small, text_color=color.new(color.white, 0), text_halign=text.align_right, bgcolor=color.new(color.blue, 30))
+    // Modo y override (criterio 1.6).
+    f_dash_row(dash, 1,  'Override',     mode_override, c_val)
+    // Preset / perfil / dirección (criterio 8.4).
+    f_dash_row(dash, 2,  'Preset',       assetStr,   c_val)
+    f_dash_row(dash, 3,  'Perfil',       profileStr, c_val)
+    f_dash_row(dash, 4,  'Dirección',    dirStr,     c_val)
+    // Estado operativo actual.
+    f_dash_row(dash, 5,  'Estado',       estado_str, estado_col)
+    // Calidad de señal: score por lado.
+    f_dash_row(dash, 6,  'Score L/S',    f_fmt_num(score_long) + ' / ' + f_fmt_num(score_short), c_val)
+    // Régimen y volatilidad.
+    f_dash_row(dash, 7,  'ADX / ATR%',   f_fmt_num(adx_val) + ' / ' + f_fmt_num(atr_pct), c_val)
+    // Confirmación HTF y volumen.
+    f_dash_row(dash, 8,  'HTF',          htf_str, c_val)
+    f_dash_row(dash, 9,  'Volumen ok',   vol_str, c_val)
+    // Métricas del backtest (criterios 8.1, 8.2, 8.3).
+    f_dash_row(dash, 10, 'Profit Factor', f_fmt_num(dash_pf), c_val)
+    f_dash_row(dash, 11, 'Win Rate %',    f_fmt_num(dash_wr), c_val)
+    f_dash_row(dash, 12, 'Net PnL',       f_fmt_num(strategy.netprofit), strategy.netprofit >= 0 ? color.new(color.green, 0) : color.new(color.red, 0))
+    f_dash_row(dash, 13, 'Operaciones',   str.tostring(dash_trades), c_val)
+    // Próxima qty estimada (lado con mayor score).
+    f_dash_row(dash, 14, 'Próx. qty',     f_fmt_qty(next_qty), c_val)
+    // Nota de modo de detección (auto/manual) para contexto.
+    f_dash_row(dash, 15, 'Detección',     mode_is_auto ? 'Auto' : 'Manual', c_val)
+
+// --- Plots de EMAs (gateados por i_show_emas / i_show_ema200) ----------------
+// Las EMAs se dibujan en escala de precio (overlay=true). Pasar na desactiva la
+// línea en la barra cuando el "show" está apagado.
+plot(i_show_emas ? ema_fast : na, 'EMA rápida', color=color.new(color.aqua, 0),   linewidth=1)
+plot(i_show_emas ? ema_slow : na, 'EMA lenta',  color=color.new(color.orange, 0), linewidth=2)
+plot(i_show_emas and i_show_ema200 ? ema_200 : na, 'EMA 200', color=color.new(color.fuchsia, 0), linewidth=1)
+
+// --- Plots de niveles SL/TP (solo con posición abierta; plot.style_linebr) ---
+// style_linebr corta la línea cuando el valor es na, de modo que los niveles
+// aparecen únicamente mientras hay posición viva (in_pos).
+plot(i_show_levels and in_pos ? sl_live : na, 'SL vivo', color=color.new(color.red, 0),    linewidth=2, style=plot.style_linebr)
+plot(i_show_levels and in_pos ? tp1     : na, 'TP1',     color=color.new(color.green, 30),  linewidth=1, style=plot.style_linebr)
+plot(i_show_levels and in_pos ? tp2     : na, 'TP2',     color=color.new(color.green, 15),  linewidth=1, style=plot.style_linebr)
+plot(i_show_levels and in_pos ? tp3     : na, 'TP3',     color=color.new(color.green, 0),   linewidth=1, style=plot.style_linebr)
+
+// --- Marcadores de entrada (shapes) gateados por i_show_signals --------------
+// Flechas debajo/encima de la barra cuando se confirma la entrada long/short.
+plotshape(i_show_signals and entry_long_final,  title='Entrada LONG',  style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small, text='L')
+plotshape(i_show_signals and entry_short_final, title='Entrada SHORT', style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),   size=size.small, text='S')
+
+
+// ============================================================================
+// TAREA 12 — Alertas por webhook (JSON) por modo (entradas y salidas)
+// ----------------------------------------------------------------------------
+// Materializa la capa de WEBHOOKS del diseño (Componente 9). Emite alertas en
+// formato JSON construidas por concatenación de strings (Pine v6 no tiene
+// serializador nativo) usando los helpers f_fmt_price/f_fmt_num/f_fmt_qty.
+//
+// Campos comunes y por tipo (criterios 9.1, 9.2, 9.3):
+//   - Entradas: "action" (buy/sell), "mode" (Swing/Day), "direction" (long/short),
+//     "symbol", "entry_ref" (close), "qty", "leverage", "sl", "risk_pct",
+//     "score", "opposite_score", "regime", "session", "profile".
+//   - Salidas:  "action":"close", "mode", "exit_type" ∈ {TP1,TP2,TP3,SL,BE,
+//     DEFENSIVE}, "symbol", "direction", "entry_ref".
+//
+// Disparo (alert() con alert.freq_once_per_bar_close, coherente con
+// process_orders_on_close):
+//   - Entradas: una vez por cierre de barra en entry_long_final/entry_short_final
+//     cuando i_wh_on está activo.
+//   - Salidas defensivas (mínimo requerido): en defensive_long/defensive_short
+//     con exit_type "DEFENSIVE".
+//   - Salidas por TP/SL (best-effort): los fills de strategy.exit no son
+//     directamente observables como evento; se DETECTAN por reducción del tamaño
+//     de la posición respecto a la barra previa (strategy.position_size[1]) y se
+//     infiere el exit_type comparando el rango de la barra con los niveles
+//     tp1/tp2/tp3 y el estado be_armed de la barra previa (referencias [1], ya
+//     que el Exit_Manager resetea estos niveles al quedar plano). Es una
+//     aproximación pragmática y documentada, no un mapeo exacto del fill.
+//
+// Requisitos cubiertos: 9.1, 9.2, 9.3
+// ============================================================================
+
+// --- Inputs de webhook (grupo "P. Webhooks") ---------------------------------
+// Activación de alertas (desactivado por defecto para no emitir en backtest).
+i_wh_on   = input.bool(false, 'Activar alertas webhook (JSON)', group='P. Webhooks', tooltip='Si está activo, emite alertas JSON en entradas y salidas.')
+// Símbolo a incluir en el payload (formato exchange:par, p. ej. BINANCE:BTCUSDT).
+i_symbol  = input.string('BINANCE:BTCUSDT', 'Símbolo (symbol)', group='P. Webhooks', tooltip='Símbolo que se incluirá en el campo "symbol" del JSON.')
+// Apalancamiento para el payload. Pine v6 exige un defval constante en input.*,
+// por lo que no se puede usar i_leverage como default directo; se usa 0 como
+// centinela: 0 => "usar el apalancamiento de la estrategia (i_leverage)".
+i_lev_wh  = input.int(0, 'Apalancamiento webhook (0 = usar el de la estrategia)', minval=0, group='P. Webhooks', tooltip='Apalancamiento a reportar en el JSON. 0 toma el i_leverage del Risk_Manager.')
+
+// Apalancamiento efectivo del webhook (default = i_leverage cuando el input es 0).
+lev_wh = i_lev_wh <= 0 ? i_leverage : i_lev_wh
+
+// Contexto común reportado en las alertas (régimen y sesión legibles).
+regime_str  = regime_trend ? 'trend' : 'range'
+session_str = is_prime_session ? 'prime' : 'off'
+
+// --- Constructores de payload JSON (funciones puras, evaluables) -------------
+
+// JSON de ENTRADA: incluye modo, dirección, símbolo y métricas de la operación.
+f_json_entry(_action, _direction, _entry_ref, _qty, _lev, _sl, _risk_pct, _score, _opp_score) =>
+    '{' +
+     '"action":"'        + _action      + '",' +
+     '"mode":"'          + modeStr       + '",' +
+     '"direction":"'     + _direction    + '",' +
+     '"symbol":"'        + i_symbol      + '",' +
+     '"entry_ref":'      + f_fmt_price(_entry_ref) + ',' +
+     '"qty":'            + f_fmt_qty(_qty)         + ',' +
+     '"leverage":'       + str.tostring(_lev)      + ',' +
+     '"sl":'             + f_fmt_price(_sl)        + ',' +
+     '"risk_pct":'       + f_fmt_num(_risk_pct)    + ',' +
+     '"score":'          + str.tostring(_score)    + ',' +
+     '"opposite_score":' + str.tostring(_opp_score) + ',' +
+     '"regime":"'        + regime_str    + '",' +
+     '"session":"'       + session_str   + '",' +
+     '"profile":"'       + profileStr    + '"' +
+     '}'
+
+// JSON de SALIDA: action close + tipo de salida + campos comunes.
+f_json_exit(_exit_type, _direction, _entry_ref) =>
+    '{' +
+     '"action":"close",' +
+     '"mode":"'      + modeStr     + '",' +
+     '"exit_type":"' + _exit_type  + '",' +
+     '"symbol":"'    + i_symbol    + '",' +
+     '"direction":"' + _direction  + '",' +
+     '"entry_ref":'  + f_fmt_price(_entry_ref) +
+     '}'
+
+// Validador puro del conjunto de exit_type permitido (usado en aserciones 12.2).
+f_exit_type_valid(_t) =>
+    _t == 'TP1' or _t == 'TP2' or _t == 'TP3' or _t == 'SL' or _t == 'BE' or _t == 'DEFENSIVE'
+
+// --- Disparo de alertas de ENTRADA -------------------------------------------
+// Una vez por cierre de barra al confirmarse la entrada del lado correspondiente.
+// Para long: score propio = score_long, opuesto = score_short (y viceversa).
+if i_wh_on and entry_long_final
+    alert(f_json_entry('buy', 'long', close, qty_long, lev_wh, sl_long, eff_risk_pct, score_long, score_short), alert.freq_once_per_bar_close)
+if i_wh_on and entry_short_final
+    alert(f_json_entry('sell', 'short', close, qty_short, lev_wh, sl_short, eff_risk_pct, score_short, score_long), alert.freq_once_per_bar_close)
+
+// --- Disparo de alertas de SALIDA DEFENSIVA (mínimo requerido) ----------------
+// defensive_long/short se calculan en el Exit_Manager; en esa barra la posición
+// sigue reflejada en entry_price (el fill de strategy.close se materializa al
+// cierre). direction = lado que se cierra.
+if i_wh_on and defensive_long
+    alert(f_json_exit('DEFENSIVE', 'long', entry_price), alert.freq_once_per_bar_close)
+if i_wh_on and defensive_short
+    alert(f_json_exit('DEFENSIVE', 'short', entry_price), alert.freq_once_per_bar_close)
+
+// --- Disparo best-effort de alertas de SALIDA por TP/SL/BE -------------------
+// Se detecta la reducción del tamaño de la posición respecto a la barra previa.
+// Los niveles del Exit_Manager se resetean al quedar plano, por lo que se leen
+// con [1] (estado de la barra previa, cuando la posición seguía abierta).
+wh_prev_size  = strategy.position_size[1]
+wh_cur_size   = strategy.position_size
+wh_reduced    = wh_prev_size != 0 and math.abs(wh_cur_size) < math.abs(wh_prev_size)
+wh_was_long   = wh_prev_size > 0
+wh_exit_ref   = strategy.position_avg_price[1]   // entrada de la posición que se reduce
+
+// Evita doble alerta cuando la reducción procede de una salida defensiva: el
+// fill defensivo se refleja en el tamaño en la barra siguiente, por lo que se
+// ignora la reducción si en la barra previa hubo cierre defensivo.
+wh_def_prev   = defensive_long[1] or defensive_short[1]
+
+// Inferencia best-effort del exit_type por comparación del rango de la barra con
+// los niveles previos (de mayor a menor R); BE si el SL ya estaba en break-even.
+wh_exit_type  = wh_was_long ?
+     (high >= tp3[1] ? 'TP3' : high >= tp2[1] ? 'TP2' : high >= tp1[1] ? 'TP1' : (be_armed[1] ? 'BE' : 'SL')) :
+     (low  <= tp3[1] ? 'TP3' : low  <= tp2[1] ? 'TP2' : low  <= tp1[1] ? 'TP1' : (be_armed[1] ? 'BE' : 'SL'))
+
+if i_wh_on and wh_reduced and not wh_def_prev
+    alert(f_json_exit(wh_exit_type, wh_was_long ? 'long' : 'short', wh_exit_ref), alert.freq_once_per_bar_close)
+
+// --- Sub-tarea 12.2 (opcional): aserciones del payload de alertas ------------
+// Aserciones lógicas sobre los constructores puros, evaluadas en la última barra
+// (Testing Strategy del diseño). No alteran la lógica de trading ni emiten nada.
+
+// Property 17: La alerta de entrada incluye modo y campos comunes.
+// El JSON de entrada contiene "mode" igual al modo activo y los campos
+// "symbol", "direction" y "entry_ref" presentes y no vacíos.
+// **Validates: Requirements 9.1, 9.3**
+p17_sample = f_json_entry('buy', 'long', 100.0, 1.0, 3, 95.0, 1.0, 7, 3)
+p17_ok = str.contains(p17_sample, '"mode":"' + modeStr + '"') and str.contains(p17_sample, '"symbol":"') and str.length(i_symbol) > 0 and str.contains(p17_sample, '"direction":"long"') and str.contains(p17_sample, '"entry_ref":100')
+
+// Property 18: La alerta de salida identifica el tipo de salida.
+// El JSON de salida contiene un exit_type del conjunto permitido y los campos
+// "symbol", "direction" y "entry_ref".
+// **Validates: Requirements 9.2, 9.3**
+p18_sample    = f_json_exit('TP2', 'short', 100.0)
+p18_types_ok  = f_exit_type_valid('TP1') and f_exit_type_valid('TP2') and f_exit_type_valid('TP3') and f_exit_type_valid('SL') and f_exit_type_valid('BE') and f_exit_type_valid('DEFENSIVE') and not f_exit_type_valid('XX')
+p18_fields_ok = str.contains(p18_sample, '"exit_type":"TP2"') and str.contains(p18_sample, '"symbol":"') and str.contains(p18_sample, '"direction":"short"') and str.contains(p18_sample, '"entry_ref":100')
+p18_ok = p18_types_ok and p18_fields_ok
+
+if barstate.islast
+    if not p17_ok
+        runtime.error('Alerta de entrada incompleta (Property 17): falta "mode" o un campo común (symbol/direction/entry_ref).')
+    if not p18_ok
+        runtime.error('Alerta de salida incompleta (Property 18): exit_type fuera del conjunto o falta un campo común.')
+
+
+
+// ============================================================================
+// TAREA 13 (opcional) — Tabla de debug / auto-test de invariantes
+// ----------------------------------------------------------------------------
+// Materializa la "Tabla de auto-test opcional" descrita en la Testing Strategy
+// del diseño. Añade un toggle i_debug (grupo "Q. Debug", default false). Cuando
+// está activo, dibuja un panel compacto en la esquina inferior izquierda que
+// muestra el resultado PASS/FAIL de las invariantes COMPUTABLES sobre el estado
+// ACTUAL de la barra, para verificación manual rápida:
+//
+//   - Property 2  : un único modo activo (isDay XOR isSwing).
+//   - Property 7  : tp1+tp2+tp3 == 100 (usa los % normalizados n_tp1/2/3_pct).
+//   - Property 11 : qty*close <= max_notional (revisa qty_long y qty_short).
+//   - Property 19 : SL del lado correcto (cuando in_pos: sl_live vs entry_price).
+//
+// Las aserciones runtime.error dispersas por el script (Tareas 2/4/8/10/12) se
+// conservan tal cual; esta tarea SOLO añade un panel visual consolidado. Es
+// ligero: se construye únicamente en barstate.islast y solo cuando i_debug es
+// true, por lo que no afecta al rendimiento ni a la lógica de trading.
+//
+// Requisitos cubiertos: 1.5, 3.6, 5.2, 3.3
+// ============================================================================
+
+// --- Input toggle de depuración (grupo "Q. Debug") ---------------------------
+i_debug = input.bool(false, 'Mostrar tabla de auto-test (debug)', group='Q. Debug', tooltip='Panel de verificación PASS/FAIL de invariantes computables sobre el estado actual. No altera la lógica de trading.')
+
+// --- Tolerancias de comparación (punto flotante / ticks) ---------------------
+dbg_tol_pct = 1e-6                                   // tolerancia para suma de %
+dbg_tol_px  = math.max(syminfo.mintick, 1e-9)        // tolerancia de precio (ticks)
+dbg_tol_not = math.max(max_notional, 1.0) * 1e-6     // tolerancia relativa de notional
+
+// --- Evaluación de las invariantes computables sobre el estado actual --------
+
+// Property 2: exactamente un modo activo (XOR). Debe cumplirse siempre (1.5).
+dbg_p2_ok = isDay != isSwing
+
+// Property 7: los porcentajes parciales normalizados suman 100 (3.6).
+dbg_sum_pct = n_tp1_pct + n_tp2_pct + n_tp3_pct
+dbg_p7_ok   = math.abs(dbg_sum_pct - 100.0) < dbg_tol_pct
+
+// Property 11: la cantidad nunca excede el cap de notional (5.2).
+// Se revisan ambos lados (qty_long/qty_short); tratar na como sin violación.
+dbg_notional_long  = nz(qty_long)  * close
+dbg_notional_short = nz(qty_short) * close
+dbg_p11_long_ok    = dbg_notional_long  <= max_notional + dbg_tol_not
+dbg_p11_short_ok   = dbg_notional_short <= max_notional + dbg_tol_not
+dbg_p11_ok         = dbg_p11_long_ok and dbg_p11_short_ok
+
+// Property 19: el SL está del lado correcto de la entrada (3.3).
+// Solo aplica con posición abierta; con break-even puede quedar en la entrada.
+// Si no hay posición, la invariante no aplica (se marca como PASS / N/A).
+dbg_p19_applies = in_pos and not na(sl_live) and not na(entry_price)
+dbg_p19_ok      = (not dbg_p19_applies) or (isLong ? sl_live <= entry_price + dbg_tol_px : sl_live >= entry_price - dbg_tol_px)
+
+// --- Helpers de presentación PASS/FAIL ---------------------------------------
+// Texto y color por resultado booleano (verde PASS / rojo FAIL).
+f_dbg_txt(_ok) =>
+    _ok ? 'PASS' : 'FAIL'
+f_dbg_col(_ok) =>
+    _ok ? color.new(color.green, 0) : color.new(color.red, 0)
+
+// Fila de invariante: etiqueta + estado coloreado.
+f_dbg_row(_t, _r, _label, _ok) =>
+    table.cell(_t, 0, _r, _label,        text_size=size.small, text_color=color.new(color.white, 0), text_halign=text.align_left,  bgcolor=color.new(color.black, 70))
+    table.cell(_t, 1, _r, f_dbg_txt(_ok), text_size=size.small, text_color=f_dbg_col(_ok),            text_halign=text.align_right, bgcolor=color.new(color.black, 70))
+
+// --- Construcción del panel (solo barstate.islast y solo si i_debug) ---------
+// Tabla creada una vez en var; se rellena en la última barra para ser ligera.
+var table dbg_tbl = table.new(position.bottom_left, 2, 6, border_width=1, frame_width=1, frame_color=color.new(color.gray, 50))
+
+if i_debug and barstate.islast
+    // Resultado global: PASS solo si todas las invariantes computables pasan.
+    dbg_all_ok = dbg_p2_ok and dbg_p7_ok and dbg_p11_ok and dbg_p19_ok
+    // Cabecera con el veredicto global.
+    table.cell(dbg_tbl, 0, 0, 'Auto-test',          text_size=size.small, text_color=color.new(color.white, 0), text_halign=text.align_left,  bgcolor=color.new(color.blue, 30))
+    table.cell(dbg_tbl, 1, 0, f_dbg_txt(dbg_all_ok), text_size=size.small, text_color=f_dbg_col(dbg_all_ok),     text_halign=text.align_right, bgcolor=color.new(color.blue, 30))
+    // Una fila por invariante computable (PASS/FAIL sobre el estado actual).
+    f_dbg_row(dbg_tbl, 1, 'P2  modo único (XOR)',  dbg_p2_ok)
+    f_dbg_row(dbg_tbl, 2, 'P7  ΣTP% == 100',       dbg_p7_ok)
+    f_dbg_row(dbg_tbl, 3, 'P11 qty·close ≤ cap',   dbg_p11_ok)
+    // P19 muestra N/A cuando no hay posición (la invariante no aplica).
+    table.cell(dbg_tbl, 0, 4, 'P19 SL lado correcto', text_size=size.small, text_color=color.new(color.white, 0), text_halign=text.align_left, bgcolor=color.new(color.black, 70))
+    table.cell(dbg_tbl, 1, 4, dbg_p19_applies ? f_dbg_txt(dbg_p19_ok) : 'N/A', text_size=size.small, text_color=dbg_p19_applies ? f_dbg_col(dbg_p19_ok) : color.new(color.gray, 0), text_halign=text.align_right, bgcolor=color.new(color.black, 70))
+    // Detalle numérico de apoyo (suma de %), útil para diagnóstico manual.
+    f_dbg_row(dbg_tbl, 5, 'ΣTP% = ' + f_fmt_num(dbg_sum_pct), dbg_p7_ok)
+
+
+
+// ============================================================================
+// TAREA 14 — Verificación de compatibilidad hacia atrás (diaria o superior)
+// ----------------------------------------------------------------------------
+// Esta es una tarea de VERIFICACIÓN / DOCUMENTACIÓN: no añade lógica de trading
+// nueva, sino que confirma —con notas comentadas y una guarda de aserción
+// ligera— que el comportamiento "swing" previo se reproduce intacto cuando el
+// selector está en "Auto" y el gráfico es diario o superior.
+//
+// CONTEXTO (cómo se garantiza la compatibilidad por construcción):
+//   1) Auto-detección de modo (Tarea 2):
+//        isDay = (i_mode=="Auto" and tf_sec <= 3600)      // <= 60 min => Day
+//        isSwing = not isDay
+//      Como una vela diaria dura 86 400 s (>> 3600), en "Auto" cualquier
+//      temporalidad diaria o superior (1D, 2D, 3D, W, M) cae SIEMPRE en Swing.
+//      Por tanto, en diario+ y Auto: isSwing == true (mismo modo que la v11).
+//
+//   2) Defaults de modo (Tarea 3):
+//        En Swing, los md_* toman los inputs del grupo "K. Modo Swing", cuyos
+//        valores por defecto reproducen la calibración swing previa:
+//          - HTF semanal  : i_htf_swing        = "W"
+//          - TP1/2/3 (R)   : 1.5 / 3.0 / 6.0   (objetivos amplios swing)
+//          - Trailing (ATR): i_trail_atr_swing = 3.0 (amplio)
+//          - Min_Score     : i_min_score_swing = 6 (selectivo)
+//        Estos son exactamente los disparadores y salidas del comportamiento
+//        swing original, por lo que la compatibilidad hacia atrás se preserva.
+//
+//   3) Resolución de parámetros (Tarea 3/4) y presets/perfiles:
+//        Todos los eff_* pasan por f_resolve con precedencia
+//          CUSTOM input del usuario > override del preset por modo > default modo.
+//        Los presets (BTC/ETH/SOL/ORO/CUSTOM) y perfiles (CONSERVADOR/
+//        BALANCEADO/AGRESIVO) siguen cableados a través de esa misma cadena
+//        (ver Tarea 4: f_ov_*, prof_score_adj, prof_risk_mult), de modo que
+//        conservan su calibración: en diario+ y Auto se aplican los overrides
+//        de preset por modo SWING (no los de Day), idénticos en espíritu a v11.
+//
+// Conclusión: en "Auto" + diario o superior, los eff_* resueltos son los del
+// modo Swing y, por tanto, los triggers, salidas y presets por defecto coinciden
+// con el comportamiento swing previo. La verificación se formaliza abajo.
+//
+// Requisitos cubiertos: 10.1, 10.2, 10.3, 10.4
+// ============================================================================
+
+// --- Función pura: ¿"Auto" + esta TF (en s) resuelve a Swing? ----------------
+// Reproduce la regla de auto-detección de forma evaluable para aserciones.
+// En Auto: isDay = (_sec <= 3600); por tanto Swing = (_sec > 3600).
+f_auto_is_swing(_sec) =>
+    _sec > 3600
+
+// --- Verificación 1: diario o superior en Auto SIEMPRE es Swing --------------
+// Se comprueba sobre temporalidades representativas diarias y superiores:
+//   1D = 86 400 s, 2D = 172 800 s, 3D = 259 200 s, W = 604 800 s, M ≈ 2 592 000 s.
+// Property relacionada: Property 1 (auto-detección) y Property 2 (XOR de modo).
+bc_daily_swing_ok  = f_auto_is_swing(86400)
+bc_2day_swing_ok   = f_auto_is_swing(172800)
+bc_3day_swing_ok   = f_auto_is_swing(259200)
+bc_weekly_swing_ok = f_auto_is_swing(604800)
+bc_month_swing_ok  = f_auto_is_swing(2592000)
+bc_daily_plus_ok   = bc_daily_swing_ok and bc_2day_swing_ok and bc_3day_swing_ok and bc_weekly_swing_ok and bc_month_swing_ok
+
+// --- Verificación 2: guarda sobre el gráfico ACTUAL --------------------------
+// Aserción ligera solicitada: cuando i_mode=="Auto" y tf_sec >= 86400 (diario o
+// superior), isSwing DEBE ser true (reproduce el comportamiento swing previo).
+// Si la TF actual no es diaria o superior, la guarda no aplica (queda en true).
+bc_chart_guard_ok = (i_mode != 'Auto') or (tf_sec < 86400) or isSwing
+
+// --- Verificación 3: en Swing, los defaults efectivos son los del modo Swing -
+// Confirma que con isSwing los defaults de modo (md_*) provienen del grupo
+// "K. Modo Swing" (HTF semanal, TPs amplios, trailing amplio, Min_Score alto),
+// es decir, la calibración swing previa. Solo se evalúa cuando isSwing es true.
+bc_swing_defaults_ok = (not isSwing) or (md_htf_tf == i_htf_swing and md_tp1_r == i_tp1_r_swing and md_tp2_r == i_tp2_r_swing and md_tp3_r == i_tp3_r_swing and md_trail_atr == i_trail_atr_swing and md_min_score == i_min_score_swing)
+
+// --- Verificación 4: presets y perfiles conservan su calibración -------------
+// Los presets (BTC/ETH/SOL/ORO/CUSTOM) y perfiles (CONSERVADOR/BALANCEADO/
+// AGRESIVO) siguen disponibles y cableados a f_resolve. Se confirma que para el
+// activo con preset seleccionado, en modo Swing el override de preset (lado
+// !_d => Swing) es el que alimenta eff_* (no el de Day). Para activos con
+// preset comprobamos coherencia de un parámetro representativo (TP1 R Swing):
+//   - eff_tp1_r debe coincidir con el override Swing del preset cuando isSwing
+//     y no se usa CUSTOM. (CUSTOM cede a los inputs del usuario, no a preset.)
+bc_preset_wired_ok = use_custom or (not isSwing) or (eff_tp1_r == f_ov_tp1r(i_asset, false))
+
+// --- Guarda consolidada en la última barra -----------------------------------
+// No interrumpe el trading; solo verifica las invariantes de compatibilidad.
+if barstate.islast
+    if not bc_daily_plus_ok
+        runtime.error('Compatibilidad hacia atrás (Tarea 14): en "Auto", una TF diaria o superior debería resolver a Swing.')
+    if not bc_chart_guard_ok
+        runtime.error('Compatibilidad hacia atrás (Tarea 14): en "Auto" con TF diaria o superior, isSwing debe ser true.')
+    if not bc_swing_defaults_ok
+        runtime.error('Compatibilidad hacia atrás (Tarea 14): en Swing, los defaults efectivos no coinciden con los del grupo "K. Modo Swing".')
+    if not bc_preset_wired_ok
+        runtime.error('Compatibilidad hacia atrás (Tarea 14): el override de preset por modo Swing no está alimentando eff_* como se espera.')

@@ -120,8 +120,8 @@ trig_short = pulled_short and turn_short and break_short
 vol_ok = na(volsma) ? true : volume >= volsma * 1.2
 sc_long = (trend_long?2:0)+(macro_long?2:0)+(htf_bull?2:(htf_ok_long?1:0))+(macdL>macdS?1:0)+(rsi>=50?1:0)+(vol_ok?int(eff_volw):0)+(trig_long?1:0)
 sc_short= (trend_short?2:0)+(macro_short?2:0)+(htf_bear?2:(htf_ok_short?1:0))+(macdL<macdS?1:0)+(rsi<=50?1:0)+(vol_ok?int(eff_volw):0)+(trig_short?1:0)
-score_long  = math.min(10, sc_long)
-score_short = math.min(10, sc_short)
+score_long  = int(math.min(10, sc_long))
+score_short = int(math.min(10, sc_short))
 
 i_lv_show   = input.bool(true,'Mostrar niveles y swings', group='10. Niveles')
 i_lv_left   = input.int(5,'Swing izquierda', minval=1, group='10. Niveles')
@@ -308,7 +308,7 @@ f_sessionbox(_active, _show, _col, _name) =>
         _a = str.tostring(sm / ct, format.mintick)
         _t = _name + ' R:' + _r
         _t := _t + ' Avg:' + _a
-        label.set_xy(lb, math.round((sb + bar_index) / 2), lo)
+        label.set_xy(lb, int((sb + bar_index) / 2), lo)
         label.set_text(lb, _t)
     was := _active
 col_tk = color.rgb(233, 30, 99)

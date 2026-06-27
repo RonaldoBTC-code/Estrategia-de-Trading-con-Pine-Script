@@ -1,14 +1,14 @@
 # 📈 Estrategia de Trading con Pine Script
 
-> **CB Swing Pro v13.1 (Quant Pullback)** — Estrategia cuantitativa para TradingView con modos *Swing* y *Day* auto-detectados, entradas por *pullback-continuación*, filtro anti-rango y gestión de riesgo profesional.
+> **CB Swing Pro v13.3 (Quant Pullback)** — Estrategia cuantitativa para TradingView con modos *Swing* y *Day* auto-detectados, entradas por *pullback-continuación*, filtro anti-rango y gestión de riesgo profesional.
 
 ![Pine Script](https://img.shields.io/badge/Pine%20Script-v6-2962FF?logo=tradingview&logoColor=white)
 ![Plataforma](https://img.shields.io/badge/Plataforma-TradingView-131722?logo=tradingview&logoColor=white)
-![Versión](https://img.shields.io/badge/Versi%C3%B3n-v13.1-blueviolet.svg)
+![Versión](https://img.shields.io/badge/Versi%C3%B3n-v13.3-blueviolet.svg)
 ![Licencia](https://img.shields.io/badge/Licencia-MIT-green.svg)
 ![Estado](https://img.shields.io/badge/Estado-Activo-brightgreen.svg)
 
-**CB Swing Pro v13.1** es una estrategia escrita en **Pine Script v6** para el *Strategy Tester* de **TradingView**. Es una reescritura centrada en la **calidad de entrada**: en lugar de entrar por cruces tardíos de medias, busca el **retroceso (pullback) a la media con confirmación de giro y ruptura**, evita explícitamente los rangos y confirma la tendencia macro por la pendiente de la EMA200 y un filtro de temporalidad superior (HTF) sin repintado. Todo ello calibrado con **presets por activo** (BTC, ETH, SOL, ORO) y perfiles de agresividad.
+**CB Swing Pro v13.3** es una estrategia escrita en **Pine Script v6** para el *Strategy Tester* de **TradingView**. Es una reescritura centrada en la **calidad de entrada**: en lugar de entrar por cruces tardíos de medias, busca el **retroceso (pullback) a la media con confirmación de giro y ruptura**, evita explícitamente los rangos y confirma la tendencia macro por la pendiente de la EMA200 y un filtro de temporalidad superior (HTF) sin repintado. Todo ello calibrado con **presets por activo** (BTC, ETH, SOL, ORO) y perfiles de agresividad.
 
 > 📘 **¿Es tu primera vez?** Lee la **[Guía fácil para principiantes (explicada para todos)](GUIA.md)**.
 
@@ -59,7 +59,7 @@ La estrategia evalúa cada barra confirmada a través de un *pipeline* por etapa
 
 1. Abre el **Pine Editor** en [TradingView](https://www.tradingview.com/).
 2. Copia el contenido de [`cb-swing-pro-v13.pine`](./cb-swing-pro-v13.pine) y pégalo en el editor.
-3. Pulsa **Add to chart / Añadir al gráfico**. Confirma que arriba a la izquierda del gráfico se lee **`CB v13.1 Quant`**.
+3. Pulsa **Add to chart / Añadir al gráfico**. Confirma que arriba a la izquierda del gráfico se lee **`CB v13.3 Quant`**.
 4. **Importante:** si actualizaste desde una versión anterior, pulsa **"Restablecer ajustes"** en el *Strategy Tester* para que tome los presets nuevos.
 5. Deja **Modo = Auto** para detectar *Swing* o *Day* según tu temporalidad.
 6. Elige el **preset del activo** (BTC / ETH / SOL / ORO / CUSTOM).
@@ -123,4 +123,15 @@ Distribuido bajo la licencia **MIT**. Consulta el archivo [`LICENSE`](./LICENSE)
 
 ---
 
-<p align="center"><sub>Hecho con 📈 y Pine Script · CB Swing Pro v13.1 (Quant Pullback)</sub></p>
+<p align="center"><sub>Hecho con 📈 y Pine Script · CB Swing Pro v13.3 (Quant Pullback)</sub></p>
+
+
+---
+
+## 🆕 v13.3 — Sesiones de mercado y Niveles
+
+- Cajas de sesión (Tokio/Londres/Nueva York) con rango y promedio, colores representativos y reloj con la hora local de cada plaza.
+- Filtro multi-sesión opcional (operar solo en las sesiones elegidas).
+- Módulo de Niveles: detección de swings (pivotes), líneas de soporte/resistencia que se extienden y zonas de demanda.
+- Los swings sirven además como confirmación de entrada (configurable y desactivable en el grupo "10. Niveles").
+- Correcciones: etiquetas sin saltos de línea y detección de inicio de sesión sin na() sobre booleanos.

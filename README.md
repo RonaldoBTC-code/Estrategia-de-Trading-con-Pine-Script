@@ -1,6 +1,6 @@
-# 📈 Estrategia de Trading con Pine Script
+# 📈 CB Swing Pro v13.3 — Estrategia de Trading en Pine Script
 
-> **CB Swing Pro v13.3 (Quant Pullback)** — Estrategia cuantitativa para TradingView con modos *Swing* y *Day* auto-detectados, entradas por *pullback-continuación*, filtro anti-rango y gestión de riesgo profesional.
+> Estrategia cuantitativa para **TradingView** (Pine Script v6) con entradas por *pullback-continuación*, filtro anti-rango, gestión de riesgo profesional y un módulo visual de **sesiones de mercado** y **niveles**. Diseñada para BTC, ETH, SOL y ORO mediante presets por activo.
 
 ![Pine Script](https://img.shields.io/badge/Pine%20Script-v6-2962FF?logo=tradingview&logoColor=white)
 ![Plataforma](https://img.shields.io/badge/Plataforma-TradingView-131722?logo=tradingview&logoColor=white)
@@ -8,79 +8,84 @@
 ![Licencia](https://img.shields.io/badge/Licencia-MIT-green.svg)
 ![Estado](https://img.shields.io/badge/Estado-Activo-brightgreen.svg)
 
-**CB Swing Pro v13.3** es una estrategia escrita en **Pine Script v6** para el *Strategy Tester* de **TradingView**. Es una reescritura centrada en la **calidad de entrada**: en lugar de entrar por cruces tardíos de medias, busca el **retroceso (pullback) a la media con confirmación de giro y ruptura**, evita explícitamente los rangos y confirma la tendencia macro por la pendiente de la EMA200 y un filtro de temporalidad superior (HTF) sin repintado. Todo ello calibrado con **presets por activo** (BTC, ETH, SOL, ORO) y perfiles de agresividad.
+Este repositorio contiene una estrategia automatizada de *trading* escrita en **Pine Script v6**, lista para ejecutarse y validarse en el **Strategy Tester** de TradingView. Su filosofía es priorizar **pocas señales de calidad** sobre muchas señales mediocres, con un control de riesgo estricto y un gráfico limpio y profesional.
 
-> 📘 **¿Es tu primera vez?** Lee la **[Guía fácil para principiantes (explicada para todos)](GUIA.md)**.
-
----
-
-## 📑 Tabla de contenidos
-
-- [✨ Características](#-características)
-- [🧠 ¿Cómo funciona?](#-cómo-funciona)
-- [🚀 Instalación y uso](#-instalación-y-uso)
-- [⚙️ Parámetros principales](#️-parámetros-principales)
-- [🎛️ Presets por activo](#️-presets-por-activo)
-- [📊 Validación y backtesting](#-validación-y-backtesting)
-- [⚠️ Aviso de riesgo](#️-aviso-de-riesgo)
-- [📄 Licencia](#-licencia)
+> 📘 **¿Primera vez?** Lee la **[Guía para principiantes (explicada para todos)](GUIA.md)**.
 
 ---
 
-## ✨ Características
+## 📑 Contenido
 
-- **Entradas por pullback-continuación.** No entra al cruzar la media (tarde); entra cuando el precio retrocede a la EMA20/50 y **gira con confirmación** (RSI al alza, histograma MACD girando y ruptura de la vela previa).
-- **Filtro anti-rango.** Si las EMA20 y EMA50 están demasiado juntas (compresión medida en ATR) → es rango → **no opera**. Elimina la mayoría de pérdidas por *chop*.
-- **Macro por pendiente de EMA200 + HTF sin repintado.** Reacciona antes que el clásico cruce 50/200 y confirma con la temporalidad superior usando `lookahead_off` y `[1]` (sin mirar al futuro).
-- **Modos Swing y Day auto-detectados.** ≤ 60 min → *Day* (HTF 4H); > 60 min → *Swing* (HTF Diario). También se fija manualmente.
-- **Presets por activo.** Calibraciones listas para **BTC, ETH, SOL, ORO** y un perfil **CUSTOM** configurable.
-- **Perfiles de agresividad.** *Conservador*, *Balanceado* y *Agresivo* que modulan el `Min_Score` y el riesgo por operación.
-- **Gestión de riesgo por % de equity.** Tamaño de posición por porcentaje del capital, con *stop* híbrido (estructura + ATR con *clamp*) y cap de exposición.
-- **Salidas escalonadas que dejan correr ganadores.** TP1 a 1.0R cerrando 40%, TP2 30%, *runner* 30% a TP3 con *trailing* Chandelier y *break-even* +0.2R tras TP1.
-- **Visual limpio.** SL/TP solo se dibujan con posición abierta, una etiqueta discreta por entrada y un panel compacto de estado.
-- **Alertas.** Condiciones de alerta listas para *long* y *short*.
+- [Para inversores](#-para-inversores)
+- [Para aficionados (cómo usarla)](#-para-aficionados-cómo-usarla)
+- [Para expertos en tecnología](#-para-expertos-en-tecnología)
+- [Presets por activo](#-presets-por-activo)
+- [Parámetros](#-parámetros)
+- [Validación y backtesting](#-validación-y-backtesting)
+- [Aviso de riesgo](#-aviso-de-riesgo)
+- [Licencia](#-licencia)
 
 ---
 
-## 🧠 ¿Cómo funciona?
+## 💼 Para inversores
 
-La estrategia evalúa cada barra confirmada a través de un *pipeline* por etapas:
+**¿Qué es?** Un sistema de reglas que decide *cuándo* comprar o vender un activo y *cuánto* arriesgar en cada operación, de forma 100% objetiva y reproducible (sin emociones).
 
-1. **Régimen.** Exige tendencia (ADX ≥ umbral), **no-rango** (separación mínima de EMAs en ATR) y volatilidad en banda (ATR%).
-2. **Macro + HTF.** La macro-tendencia se confirma por precio vs EMA200 y su pendiente; el HTF confirma la dirección sin repintado.
-3. **Disparo por pullback.** Retroceso reciente a la EMA20 + giro de momentum (RSI/MACD) + ruptura de continuación.
-4. **Scoring 0–10.** Pondera tendencia, macro, HTF, MACD, RSI, volumen y disparo; la entrada exige superar el `Min_Score` efectivo.
-5. **Riesgo.** Calcula el tamaño desde el riesgo por operación (% de equity) y la distancia al *stop* híbrido, respetando el cap de exposición.
-6. **Salidas.** Administra TP1/TP2/TP3, paso a *break-even*, *trailing* Chandelier y una salida defensiva por pérdida de momentum antes de TP1.
+**¿Qué problema resuelve?** Las estrategias simples suelen entrar **tarde** (cuando el movimiento ya pasó) o **en mercado lateral** (donde se pierde por ruido). CB Swing Pro v13.3 ataca ambos problemas:
 
----
+- **Entra en retrocesos, no en cruces tardíos:** espera a que el precio "respire" y vuelva hacia su media antes de continuar la tendencia → mejor relación riesgo/beneficio.
+- **Evita el mercado lateral:** un filtro detecta cuándo no hay tendencia clara y **se queda fuera**.
+- **Control de riesgo primero:** el tamaño de cada operación se calcula como un **porcentaje del capital**, con *stop loss* automático y tomas de ganancia escalonadas que **dejan correr a los ganadores**.
 
-## 🚀 Instalación y uso
+**Resultados de ejemplo (solo ilustrativos):** en pruebas históricas sobre activos como BTC y oro en temporalidad de 4 horas se han observado *Profit Factor* en torno a 1,3–1,5 y *drawdown* (caída máxima) bajo (≈ 2–5 %). 
 
-1. Abre el **Pine Editor** en [TradingView](https://www.tradingview.com/).
-2. Copia el contenido de [`cb-swing-pro-v13.pine`](./cb-swing-pro-v13.pine) y pégalo en el editor.
-3. Pulsa **Add to chart / Añadir al gráfico**. Confirma que arriba a la izquierda del gráfico se lee **`CB v13.3 Quant`**.
-4. **Importante:** si actualizaste desde una versión anterior, pulsa **"Restablecer ajustes"** en el *Strategy Tester* para que tome los presets nuevos.
-5. Deja **Modo = Auto** para detectar *Swing* o *Day* según tu temporalidad.
-6. Elige el **preset del activo** (BTC / ETH / SOL / ORO / CUSTOM).
-7. Abre el **Strategy Tester** con un **capital inicial representativo** para que el dimensionamiento por % de equity sea significativo.
+> ⚠️ **Importante:** estos números **dependen del activo, la temporalidad y el periodo**, y el comportamiento pasado **no garantiza** resultados futuros. Esto **no es asesoramiento financiero**. Consulta la sección de [Aviso de riesgo](#-aviso-de-riesgo).
 
 ---
 
-## ⚙️ Parámetros principales
+## 🎮 Para aficionados (cómo usarla)
 
-| Grupo | Descripción |
-|-------|-------------|
-| **1. Modo** | Selector del modo operativo: *Auto*, *Swing* o *Day*. |
-| **2. Preset** | Activo (BTC/ETH/SOL/ORO/CUSTOM), perfil de agresividad y dirección permitida. |
-| **3. CUSTOM** | Parámetros del activo CUSTOM (HTF, ADX, Min_Score, banda ATR%, riesgo). |
-| **4. Régimen** | Filtro anti-rango: separación mínima de EMAs (xATR). |
-| **5. Entrada** | Ventana de *pullback* (barras). |
-| **6. Sesión** | Ventana horaria UTC y bloqueo opcional fuera de sesión (modo Day). |
-| **7. Riesgo** | Riesgo por operación (% de equity), *stop* híbrido (estructura/ATR con *clamp*), apalancamiento y exposición máxima. |
-| **8. Visual** | Mostrar SL/TP en posición y fondo de régimen. |
+### Instalación en 4 pasos
+1. Abre **TradingView** → **Pine Editor** (parte inferior).
+2. Copia el contenido de [`cb-swing-pro-v13.pine`](./cb-swing-pro-v13.pine) y pégalo.
+3. Pulsa **Añadir al gráfico**. Arriba a la izquierda debe leerse **`CB v13.3 Quant`**.
+4. Si actualizaste desde otra versión, pulsa **"Restablecer ajustes"** en el *Strategy Tester*.
 
-> El valor efectivo de cada parámetro sigue la precedencia **CUSTOM del usuario → preset por activo → default del modo**.
+### Qué verás en el gráfico
+- **🔺/🔻 Triángulos:** marcan los giros del precio (suelos y techos).
+- **Líneas de Soporte (verde) y Resistencia (rojo):** niveles recientes donde el precio puede reaccionar.
+- **Cajas de sesión (Tokio 🗼 rosa, Londres 🇪🇺 azul, Nueva York 🗽 rojo):** muestran el rango de cada plaza con su promedio. Solo se ven las más recientes para no ensuciar el gráfico.
+- **🕐 Reloj de sesiones** (abajo a la derecha): hora local de cada plaza y cuál está activa.
+- **Panel** (arriba a la derecha): activo, modo, *score* y si hay tendencia o rango.
+- **Líneas SL/TP:** solo aparecen cuando hay una operación abierta.
+
+### Ajustes rápidos
+- **Modo = Auto:** detecta solo si operar a corto (*Day*) o a medio plazo (*Swing*) según tu temporalidad.
+- **Activo:** elige BTC / ETH / SOL / ORO (cada uno trae su calibración).
+- **Perfil:** Conservador (más estricto), Balanceado o Agresivo.
+- ¿Gráfico muy cargado? Baja **"Sesiones recientes a mostrar"** o desactiva **"Dibujar cajas de sesion"** y **"Mostrar niveles y swings"**.
+
+---
+
+## 🧪 Para expertos en tecnología
+
+### Arquitectura (pipeline por barra, evaluado en barra confirmada)
+1. **Régimen:** tendencia (`ADX ≥ umbral`) + **anti-rango** (separación mínima de EMA20/EMA50 medida en ATR) + volatilidad en banda (`ATR%`).
+2. **Macro + HTF:** macro-tendencia por **pendiente de la EMA200** (reacciona antes que el cruce 50/200) y confirmación de temporalidad superior con `request.security(..., close[1], lookahead=barmerge.lookahead_off)` → **sin repintado**.
+3. **Disparo (pullback-continuación):** retroceso reciente a la EMA20 + giro de momentum (RSI al alza/baja y giro del histograma MACD) + ruptura de continuación (`close > high[1]` / `close < low[1]`).
+4. **Confirmación por estructura:** un *swing* (pivote) reciente valida la entrada (`ta.pivothigh/pivotlow`); configurable.
+5. **Scoring 0–10:** pondera tendencia, macro, HTF, MACD, RSI, volumen y disparo; la entrada exige superar el `Min_Score` efectivo y un *edge* direccional.
+6. **Gestión de riesgo:** *stop* híbrido (estructura vs. ATR con *clamp* a una banda mín./máx.), dimensionamiento por **% de equity** y *cap* de exposición.
+7. **Gestión de salidas:** TP1 (1.0R, cierra 40 %), TP2 (30 %), *runner* (30 %) a TP3 con *trailing* Chandelier y *break-even* +0.2R tras TP1; salida defensiva por pérdida de momentum antes de TP1.
+
+### Decisiones de ingeniería
+- **No repintado:** lectura de HTF con `[1]` + `lookahead_off`; entradas solo en `barstate.isconfirmed`.
+- **Precedencia de parámetros:** `CUSTOM del usuario → preset por activo → default del modo`.
+- **Capa visual desacoplada:** sesiones, niveles y zonas se gestionan con `box`/`line`/`label` y **borrado *rolling*** (arrays + `array.shift`) para mantener el gráfico limpio y respetar los límites de objetos de Pine.
+- **Robustez Pine v6:** argumentos `const` en `strategy()`, divisiones protegidas (`f_safe_div`), *casts* `int()` donde el API lo exige y detección de inicio de sesión sin `na()` sobre booleanos.
+
+### Reloj de sesiones
+Horas locales en vivo con `str.format_time(timenow, 'HH:mm', tz)` para `Asia/Tokyo`, `Europe/London` y `America/New_York`; filtro multi-sesión opcional por ventanas UTC configurables.
 
 ---
 
@@ -88,50 +93,50 @@ La estrategia evalúa cada barra confirmada a través de un *pipeline* por etapa
 
 | Activo | ADX mín. (Day/Swing) | Min Score | Riesgo % | Volumen | Dirección | Notas |
 |--------|----------------------|-----------|----------|---------|-----------|-------|
-| **BTC** | 15 / 18 | 5–6 | 1.0% | Sí | AMBOS | Tendencia macro + pullback |
-| **ETH** | 16 / 19 | 5–6 | 0.8% | Sí | AMBOS | Algo más estricto que BTC |
-| **SOL** | 20 / 24 | 6–7 | 0.5% | Sí | AMBOS | Más estricto, menor tamaño, *cooldown* mayor |
-| **ORO** | 14 / 17 | 5–6 (short +2) | 0.8% | Ignorado | LONG | Shorts muy restringidos |
+| **BTC** | 15 / 18 | 5–6 | 1.0 % | Sí | AMBOS | Tendencia macro + pullback |
+| **ETH** | 16 / 19 | 5–6 | 0.8 % | Sí | AMBOS | Algo más estricto que BTC |
+| **SOL** | 20 / 24 | 6–7 | 0.5 % | Sí | AMBOS | Más estricto, menor tamaño, *cooldown* mayor |
+| **ORO** | 14 / 17 | 5–6 (short +2) | 0.8 % | Ignorado | LONG | Shorts muy restringidos |
 
-> El **perfil** modula: *Conservador* sube `Min_Score` +1 y baja el riesgo ×0.75; *Agresivo* hace lo contrario. En **1h** se activa *Day* (HTF 4H); en **Diario**, *Swing* (HTF Diario).
+> El **perfil** modula: *Conservador* sube `Min_Score` +1 y baja el riesgo ×0.75; *Agresivo* lo contrario. En **1h** se activa *Day* (HTF 4H); en **Diario**, *Swing* (HTF Diario).
+
+---
+
+## ⚙️ Parámetros
+
+| Grupo | Descripción |
+|-------|-------------|
+| **1. Modo** | Auto / Swing / Day. |
+| **2. Preset** | Activo, perfil de agresividad y dirección permitida. |
+| **3. CUSTOM** | Parámetros del activo CUSTOM. |
+| **4. Régimen** | Filtro anti-rango (separación mínima de EMAs en ATR). |
+| **5. Entrada** | Ventana de *pullback*. |
+| **6. Sesiones** | Filtro multi-sesión y ventanas horarias UTC. |
+| **7. Riesgo** | Riesgo por operación (% equity), *stop* híbrido, apalancamiento y exposición. |
+| **8. Visual** | Líneas SL/TP en posición. |
+| **9. Visual sesiones** | Cajas de sesión, nº de sesiones recientes, reloj y fondo de régimen. |
+| **10. Niveles** | Swings, líneas S/R, zonas y *swing* como confirmación. |
 
 ---
 
 ## 📊 Validación y backtesting
 
-Valida sobre una **matriz de escenarios** (activo × modo × perfil):
+Valida sobre una **matriz** activo × modo × perfil (BTC · ETH · SOL · ORO / Swing · Day / Conservador · Balanceado · Agresivo), preferentemente en temporalidades intradía (5m–1h) para apreciar las cajas y niveles.
 
-| Eje | Valores |
-|-----|---------|
-| **Activo** | BTC · ETH · SOL · ORO |
-| **Modo** | Swing · Day |
-| **Perfil** | Conservador · Balanceado · Agresivo |
-
-> ⚠️ **Pine Script no lee archivos CSV.** Los históricos usados en el desarrollo sirvieron para **calibración *offline*** (entender volatilidad y drawdowns de cada activo); la validación real se hace en el *Strategy Tester* de TradingView con sus datos. **PF > 2.0 es un objetivo de calibración, NO una garantía.** Win rate realista **55–70%**. El comportamiento histórico no anticipa resultados futuros; prueba siempre con comisiones, *slippage* y capital representativo.
+> ⚠️ **Pine Script no lee archivos CSV.** Los históricos usados en el desarrollo sirvieron para **calibración *offline***; la validación real se hace en el *Strategy Tester* de TradingView con sus datos. **El *Profit Factor* objetivo (> 2.0) es una meta de calibración, NO una garantía.** *Win rate* realista 55–70 %. Prueba siempre con comisiones, *slippage* y capital representativo.
 
 ---
 
 ## ⚠️ Aviso de riesgo
 
-Este proyecto se publica con fines **educativos e informativos**. **No constituye asesoramiento financiero, de inversión ni de trading.** Operar conlleva un riesgo elevado de pérdida y puede no ser adecuado para todos los perfiles. Eres el único responsable de tus decisiones. Opera siempre con capital que puedas permitirte perder y consulta a un profesional acreditado si lo necesitas.
+Este proyecto se publica con fines **educativos e informativos**. **No constituye asesoramiento financiero, de inversión ni de trading.** Operar en los mercados conlleva un riesgo elevado de pérdida y puede no ser adecuado para todos los perfiles. Eres el único responsable de tus decisiones. Opera solo con capital que puedas permitirte perder y consulta a un profesional acreditado si lo necesitas.
 
 ---
 
 ## 📄 Licencia
 
-Distribuido bajo la licencia **MIT**. Consulta el archivo [`LICENSE`](./LICENSE) para más detalles.
+Distribuido bajo la licencia **MIT**. Consulta [`LICENSE`](./LICENSE).
 
 ---
 
-<p align="center"><sub>Hecho con 📈 y Pine Script · CB Swing Pro v13.3 (Quant Pullback)</sub></p>
-
-
----
-
-## 🆕 v13.3 — Sesiones de mercado y Niveles
-
-- Cajas de sesión (Tokio/Londres/Nueva York) con rango y promedio, colores representativos y reloj con la hora local de cada plaza.
-- Filtro multi-sesión opcional (operar solo en las sesiones elegidas).
-- Módulo de Niveles: detección de swings (pivotes), líneas de soporte/resistencia que se extienden y zonas de demanda.
-- Los swings sirven además como confirmación de entrada (configurable y desactivable en el grupo "10. Niveles").
-- Correcciones: etiquetas sin saltos de línea y detección de inicio de sesión sin na() sobre booleanos.
+<p align="center"><sub>Hecho con 📈 y Pine Script · CB Swing Pro v13.3 (Quant Pullback + Sesiones + Niveles)</sub></p>

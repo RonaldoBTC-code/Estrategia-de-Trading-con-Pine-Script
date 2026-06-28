@@ -1,6 +1,7 @@
 //@version=6
 // ============================================================================
 // CB Swing Pro v13.3 [Quant Pullback + Sesiones + Niveles] — v6 (FINAL)
+// Visual limpio: cajas de sesion y niveles con borrado rolling (solo recientes).
 // ============================================================================
 strategy(
      title                   = 'CB Swing Pro v13.3 [Quant Pullback + Niveles]',
@@ -126,8 +127,8 @@ score_short = int(math.min(10, sc_short))
 i_lv_show   = input.bool(true,'Mostrar niveles y swings', group='10. Niveles')
 i_lv_left   = input.int(5,'Swing izquierda', minval=1, group='10. Niveles')
 i_lv_right  = input.int(3,'Swing derecha', minval=1, group='10. Niveles')
-i_lv_keep   = input.int(3,'Lineas S/R a mantener', minval=1, group='10. Niveles')
-i_lv_zones  = input.bool(true,'Mostrar zonas demanda', group='10. Niveles')
+i_lv_keep   = input.int(2,'Lineas S/R a mantener', minval=1, group='10. Niveles')
+i_lv_zones  = input.bool(false,'Mostrar zonas demanda', group='10. Niveles')
 i_use_swing = input.bool(true,'Swing como confirmacion', group='10. Niveles')
 i_swing_val = input.int(8,'Validez swing (barras)', minval=1, group='10. Niveles')
 ph = ta.pivothigh(i_lv_left, i_lv_right)
@@ -265,7 +266,7 @@ if i_lv_show and not na(ph)
     if array.size(resA) > i_lv_keep
         line.delete(array.shift(resA))
 if i_lv_show and not na(pl)
-    lns = line.new(bar_index - i_lv_right, pl, bar_index, pl, color=color.new(color.red,40), width=1, extend=extend.right)
+    lns = line.new(bar_index - i_lv_right, pl, bar_index, pl, color=color.new(color.green,0), width=1, extend=extend.right)
     array.push(supA, lns)
     if array.size(supA) > i_lv_keep
         line.delete(array.shift(supA))
@@ -276,9 +277,12 @@ if i_lv_zones and not na(pl)
         box.delete(array.shift(zonA))
 
 i_show_sessions = input.bool(true, 'Dibujar cajas de sesion', group='9. Visual sesiones')
+i_sess_keep     = input.int(2, 'Sesiones recientes a mostrar', minval=1, group='9. Visual sesiones')
 i_show_clock    = input.bool(true, 'Mostrar reloj', group='9. Visual sesiones')
 i_show_reg_bg   = input.bool(false,'Fondo de regimen', group='9. Visual sesiones')
-f_sessionbox(_active, _show, _col, _name) =>
+f_sessionbox(_active, _show, _col, _name, _keep) =>
+    var box[]   bxs = array.new<box>()
+    var label[] lbs = array.new<label>()
     var box   bx = na
     var label lb = na
     var float hi = na
@@ -294,8 +298,13 @@ f_sessionbox(_active, _show, _col, _name) =>
         sm := close
         ct := 1
         sb := bar_index
-        bx := box.new(bar_index, high, bar_index, low, border_color=_col, border_width=1, bgcolor=color.new(_col, 88))
+        bx := box.new(bar_index, high, bar_index, low, border_color=_col, border_width=1, bgcolor=color.new(_col, 90))
         lb := label.new(bar_index, low, _name, style=label.style_none, textcolor=_col, size=size.small)
+        array.push(bxs, bx)
+        array.push(lbs, lb)
+        if array.size(bxs) > _keep
+            box.delete(array.shift(bxs))
+            label.delete(array.shift(lbs))
     if _show and _active and not na(bx)
         hi := math.max(hi, high)
         lo := math.min(lo, low)
@@ -314,9 +323,9 @@ f_sessionbox(_active, _show, _col, _name) =>
 col_tk = color.rgb(233, 30, 99)
 col_ln = color.rgb(0, 90, 200)
 col_ny = color.rgb(200, 30, 45)
-f_sessionbox(tk_on, i_show_sessions, col_tk, 'Tokio')
-f_sessionbox(ln_on, i_show_sessions, col_ln, 'Londres')
-f_sessionbox(ny_on, i_show_sessions, col_ny, 'NuevaYork')
+f_sessionbox(tk_on, i_show_sessions, col_tk, 'Tokio', i_sess_keep)
+f_sessionbox(ln_on, i_show_sessions, col_ln, 'Londres', i_sess_keep)
+f_sessionbox(ny_on, i_show_sessions, col_ny, 'NuevaYork', i_sess_keep)
 bg_regime = regime_ok and macro_long ? color.new(color.green,92) : regime_ok and macro_short ? color.new(color.red,92) : na
 bgcolor(i_show_reg_bg ? bg_regime : na)
 

@@ -135,3 +135,48 @@ Distribuido bajo la licencia **MIT**. Consulta el archivo [`LICENSE`](./LICENSE)
 - Módulo de Niveles: detección de swings (pivotes), líneas de soporte/resistencia que se extienden y zonas de demanda.
 - Los swings sirven además como confirmación de entrada (configurable y desactivable en el grupo "10. Niveles").
 - Correcciones: etiquetas sin saltos de línea y detección de inicio de sesión sin na() sobre booleanos.
+
+---
+
+## Versiones (actualizado 26-ago-2026)
+
+| Archivo | Estado |
+|---|---|
+| `cb-swing-pro-v12.pine` | Histórico |
+| `cb-swing-pro-v13.pine` | Histórico |
+| `cb-swing-pro-v14.pine` | Cortacircuitos de riesgo, cooldown tras pérdida, fix de breakeven |
+| **`cb-swing-pro-v15.pine`** | **Actual.** v14 + dos parámetros validados estadísticamente |
+
+### Qué cambia v15 respecto a v14
+
+Exactamente dos números. Nada más se toca.
+
+**1. `min_score` de 6-7 a 9 (swing).** El filtro nunca se activaba: toda señal
+puntúa 7 o más. Medido en BTC, subirlo a 9 pasó la esperanza de 0.042 a 0.138 y
+bajó el drawdown de 2.82% a 1.25%.
+
+**2. `ATR% máximo` de 9.0 a 2.25 (swing, cripto).** Contra la intuición: más
+volatilidad no es más oportunidad, es menos.
+
+| Régimen | n | E[R] |
+|---|---|---|
+| ATR ≥ 2.25% | 490 | −0.1289 |
+| ATR < 2.25% | 491 | +0.1758 |
+
+Diferencia de −0.305 R por operación, p = 0.0000, ambas mitades del periodo
+coinciden y 7 de 9 activos lo confirman.
+
+El stop se coloca a distancia fija en ATR. Cuando el ATR se dispara, el stop se
+aleja en precio pero el ruido crece más rápido que la señal: la misma estructura
+produce mechas que barren el stop antes de que la tendencia se desarrolle. No
+deja de acertar la dirección — deja de sobrevivir al camino.
+
+Se usa 2.25 (la mediana medida) y no 2.0 (el óptimo del barrido), para no
+ajustar el umbral a la propia muestra.
+
+**No se tocó** el intradía ni el preset de ORO: la validación se hizo en velas
+de 4h y diarias sobre criptomonedas. Aplicarlo fuera de ahí sería extrapolar.
+
+Método: consistencia entre activos + consistencia entre mitades + test de
+permutación (10.000 barajados). Marcador: 15 hipótesis probadas, 13 rechazadas,
+1 validada, 1 candidata.

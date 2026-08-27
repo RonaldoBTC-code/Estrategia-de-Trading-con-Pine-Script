@@ -160,10 +160,10 @@ volatilidad no es más oportunidad, es menos.
 
 | Régimen | n | E[R] |
 |---|---|---|
-| ATR ≥ 2.25% | 490 | −0.1289 |
-| ATR < 2.25% | 491 | +0.1758 |
+| ATR ≥ 2.25% | 492 | −0.1306 |
+| ATR < 2.25% | 491 | +0.1644 |
 
-Diferencia de −0.305 R por operación, p = 0.0000, ambas mitades del periodo
+Diferencia de −0.295 R por operación, p = 0.0002, ambas mitades del periodo
 coinciden y 7 de 9 activos lo confirman.
 
 El stop se coloca a distancia fija en ATR. Cuando el ATR se dispara, el stop se
@@ -180,3 +180,18 @@ de 4h y diarias sobre criptomonedas. Aplicarlo fuera de ahí sería extrapolar.
 Método: consistencia entre activos + consistencia entre mitades + test de
 permutación (10.000 barajados). Marcador: 15 hipótesis probadas, 13 rechazadas,
 1 validada, 1 candidata.
+
+---
+
+### Nota de la auditoría (26-ago-2026)
+
+Los números de arriba están **reverificados de forma independiente**, con el ATR
+real de la estrategia (RMA del true range).
+
+Antes decían **p = 0.0000**. Eso no se puede medir: con 10.000 barajados, el
+p-valor más pequeño que el test resuelve es 1/10.000. El valor real es
+**0.0002**. La dirección, la magnitud y la consistencia entre activos y periodos
+se mantienen — lo que cambió fue una exageración de precisión.
+
+Regla que queda: con N barajados, el p mínimo reportable es 1/N. Si hace falta
+más resolución se sube N, no se añaden ceros.

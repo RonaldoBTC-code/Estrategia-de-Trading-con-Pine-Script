@@ -73,11 +73,11 @@ f_minscore(_a,_d) => _a=='SOL'?(_d?6:9): _a=='ORO'?(_d?5:9):(_d?5:9)
 f_atrmin(_a,_d)   => _a=='SOL'?(_d?0.25:0.90): _a=='ORO'?(_d?0.05:0.25): _a=='ETH'?(_d?0.18:0.65):(_d?0.12:0.50)
 // CAMBIO VALIDADO 2 - ATR% maximo a 2.25 en swing de CRIPTO.
 // Hipotesis 10, la unica de quince que paso las tres pruebas:
-//   ATR >= 2.25%  ->  E[R] -0.1289  (490 ops)
-//   ATR <  2.25%  ->  E[R] +0.1758  (491 ops)
-// Diferencia -0.305R, p = 0.0000, ambas mitades del periodo coinciden y 7 de 9
-// activos lo confirman. El barrido es monotono: bajar el tope mejora esperanza,
-// R total y drawdown a la vez. Se usa 2.25 (la MEDIANA medida) y no 2.0 (el
+//   ATR >= 2.25%  ->  E[R] -0.1306  (492 ops)
+//   ATR <  2.25%  ->  E[R] +0.1644  (491 ops)
+// Diferencia -0.295R, p = 0.0002, ambas mitades del periodo coinciden y 7 de 9
+// activos lo confirman (reverificado en la auditoria del 26-ago con el ATR real
+// de la estrategia). Se usa 2.25 (la MEDIANA medida, 2.2503) y no 2.0 (el
 // optimo del barrido) para no ajustar el umbral a esta muestra.
 // ORO se queda en 4.0: se valido en criptomonedas, no en metales.
 f_atrmax(_a,_d)   => _a=='SOL'?(_d?6.0:2.25): _a=='ORO'?(_d?1.6:4.0): _a=='ETH'?(_d?4.0:2.25):(_d?3.5:2.25)

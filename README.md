@@ -195,3 +195,9 @@ se mantienen — lo que cambió fue una exageración de precisión.
 
 Regla que queda: con N barajados, el p mínimo reportable es 1/N. Si hace falta
 más resolución se sube N, no se añaden ceros.
+
+## Auditoría de código e instrucciones para IA
+
+La [auditoría de Pine Script y dashboard](docs/audits/2026-09-22/audit.md) documenta 12 hallazgos, correcciones propuestas y límites de las pruebas sobre el commit `ba945cca67b523598f6e5c0bfae35ca52bdb5809`.
+
+Antes de modificar el proyecto, consultar [AGENTS.md](AGENTS.md) y el [alcance de las evidencias](docs/audits/2026-09-22/README.md). La publicación del informe no implica que los hallazgos estén corregidos ni que Pine haya sido backtesteado en TradingView durante esta auditoría.

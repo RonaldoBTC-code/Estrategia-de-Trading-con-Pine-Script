@@ -1,0 +1,74 @@
+[
+  {
+    "name": "D01 Sintaxis e indicadores producen resultado",
+    "status": "OK",
+    "detail": [
+      1,
+      1.5,
+      2.25
+    ]
+  },
+  {
+    "name": "D02 RSI suaviza suma sin dividir al terminar semilla",
+    "status": "OK",
+    "detail": {
+      "actual": 52.60416666666667,
+      "wilder": 71.73913043478261
+    }
+  },
+  {
+    "name": "D03 PnL omite comisión/slippage",
+    "status": "OK",
+    "detail": "Roundtrip mismo precio no resta costes"
+  },
+  {
+    "name": "D04 WebSocket sin gestión de cierre normal",
+    "status": "OK",
+    "detail": "onerror sí; onclose ausente"
+  },
+  {
+    "name": "D06 Cooldown deja de avanzar al llenarse buffer",
+    "status": "OK",
+    "detail": "Pasaron 8 velas, cooldown mide 0 permanentemente"
+  },
+  {
+    "name": "D07 Cierre duplicado agrega una segunda vela igual",
+    "status": "OK",
+    "detail": "Sin deduplicación REST/WS"
+  },
+  {
+    "name": "D05 Cambio rápido de preset mezcla respuesta vieja",
+    "status": "OK",
+    "detail": {
+      "symbol": "ETHUSDT",
+      "price": 60000
+    }
+  },
+  {
+    "name": "P01 Modelo aritmético: leverage multiplica riesgo",
+    "status": "OK",
+    "detail": {
+      "riskConfigured": 100,
+      "stopLoss": 500,
+      "leverage": 5,
+      "scope": "Modelo de fórmula Pine, no ejecución TradingView"
+    }
+  },
+  {
+    "name": "P02 Modelo aritmético: media sesión duplica primera vela",
+    "status": "OK",
+    "detail": {
+      "actual": 103.33333333333333,
+      "expected": 105
+    }
+  },
+  {
+    "name": "P03 Modelo aritmético: trailing puede retroceder",
+    "status": "OK",
+    "detail": {
+      "prior": 114,
+      "next": 106,
+      "scope": "Fórmula stop, no backtest"
+    }
+  }
+]

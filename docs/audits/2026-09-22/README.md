@@ -1,6 +1,6 @@
 # Auditoría de Pine Script y dashboard
 
-Informe realizado el 22 de septiembre de 2026 e publicado en el repositorio el 2 de octubre de 2026.
+Informe realizado el 22 de septiembre de 2026 y publicado en el repositorio el 2 de octubre de 2026.
 
 - [Informe completo: hallazgos P01–P12](audit.md).
 - [Resultados de las pruebas locales](evidence/dashboard-results.json).

@@ -201,3 +201,12 @@ más resolución se sube N, no se añaden ceros.
 La [auditoría de Pine Script y dashboard](docs/audits/2026-09-22/audit.md) documenta 12 hallazgos, correcciones propuestas y límites de las pruebas sobre el commit `ba945cca67b523598f6e5c0bfae35ca52bdb5809`.
 
 Antes de modificar el proyecto, consultar [AGENTS.md](AGENTS.md) y el [alcance de las evidencias](docs/audits/2026-09-22/README.md). La publicación del informe no implica que los hallazgos estén corregidos ni que Pine haya sido backtesteado en TradingView durante esta auditoría.
+
+
+## Correcciones de auditoría — v15.1 (2 de octubre de 2026)
+
+La versión activa es `cb-swing-pro-v15.pine` con título v15.1. Incorpora correcciones de riesgo, bracket inicial, HTF confirmado, stops monotónicos y alertas JSON v1. ORO Swing conserva minScore 6. En gráficos diarios, Auto usa HTF semanal; CUSTOM requiere HTF superior al gráfico. Los tramos se redondean a mincontract y se rechazan tamaños insuficientes.
+
+El dashboard incorpora correcciones de RSI, cooldown, sesiones de datos y costes estimados. Sigue siendo una demostración con HTF aproximado; no es equivalente al backtest Pine. El nuevo contrato de alertas exige migrar el consumidor: la estrategia administra las salidas y el bot no debe crear un segundo bracket.
+
+[Correcciones, pruebas y pendientes para agentes](docs/audits/2026-10-02/corrections.md). Ejecutar `node tests/audit-regressions.cjs`. Pine v15.1 todavía requiere compilación y replay en TradingView; las cifras históricas anteriores no validan esta revisión.

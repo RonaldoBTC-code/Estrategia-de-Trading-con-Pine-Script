@@ -1,0 +1,42 @@
+[
+  {
+    "name": "RSI Wilder, warmup y extremos",
+    "status": "PASS"
+  },
+  {
+    "name": "Cooldown avanza después de 1000 barras; duplicados no avanzan",
+    "status": "PASS"
+  },
+  {
+    "name": "Roundtrip mismo precio resta comisión y deslizamiento",
+    "status": "PASS"
+  },
+  {
+    "name": "Respuesta BTC tardía no contamina ETH; REST abierta excluida",
+    "status": "PASS"
+  },
+  {
+    "name": "WebSocket cierre reconecta y generaciones antiguas se descartan",
+    "status": "PASS"
+  },
+  {
+    "name": "WebSocket duplica cierre una sola vez y recupera hueco por REST",
+    "status": "PASS"
+  },
+  {
+    "name": "Simulación reproducible y aislada de equity anterior",
+    "status": "PASS"
+  },
+  {
+    "name": "Trailing nunca afloja en long/short",
+    "status": "PASS"
+  },
+  {
+    "name": "Modelo de fórmula Pine extraída: riesgo, pointvalue y redondeo",
+    "status": "PASS"
+  },
+  {
+    "name": "Pine revisión estática: geometría congelada, HTF, contratos y parciales",
+    "status": "PASS"
+  }
+]

@@ -1,13 +1,12 @@
 //@version=6
 // ============================================================================
-// CB Swing Pro v15.0 [Quant Pullback + Risk Guards + JSON Alerts] — Pine v6
+// CB Swing Pro v15.1 [Quant Pullback + Risk Guards + JSON Alerts] — Pine v6
 // ----------------------------------------------------------------------------
 // Cambios vs v13.3 (para tu CHANGELOG.md):
 //   [v14] Cortacircuitos de riesgo: max pérdida diaria (strategy.risk),
 //         racha de pérdidas y tope de trades por día (reset diario).
 //   [v14] Cooldown tras pérdida además del cooldown entre entradas.
-//   [v14] Fix breakeven: el stop salta a BE en la MISMA barra que toca TP1
-//         (antes había 1 barra de retraso).
+//   [v15.1] Bracket inmediato; BE tras fill registrado, en siguiente evaluación.
 //   [v14] Limpieza: eliminado ema50_src duplicado; request.security unificado
 //         en una sola llamada (tuple).
 //   [v14] Inputs para todo lo antes hardcodeado: chandelier lookback, multiplicador
@@ -15,13 +14,13 @@
 //   [v14] Tabla de métricas EN VIVO: PF, win rate, trades, net %, max DD %, racha.
 //   [v14] Alertas JSON con SL/TP para automatización con bots (alert_message).
 // ----------------------------------------------------------------------------
-// NO REPINTA: el HTF usa close[1]/ema50[1] con lookahead_off. Verificación en README.
+// NO REPINTA: el HTF usa close[1]/ema50[1] con lookahead_on y valores desplazados [1]; validar en replay.
 // USO EDUCATIVO. No es asesoría financiera. Opera con capital que puedas perder.
 // ============================================================================
 
 strategy(
-     title                 = 'CB Swing Pro v14.0 [Quant Pullback + Risk Guards]',
-     shorttitle            = 'CB v14.0 Quant',
+     title                 = 'CB Swing Pro v15.1 [Quant Pullback + Risk Guards]',
+     shorttitle            = 'CB v15.1 Quant',
      overlay               = true,
      pyramiding            = 0,
      initial_capital       = 10000,
@@ -69,7 +68,7 @@ f_adx(_a,_d)      => _a=='SOL'?(_d?20:24): _a=='ORO'?(_d?14:17): _a=='ETH'?(_d?1
 // Medido en 9 criptos y 2,75 anos: el filtro NUNCA se activaba porque toda
 // senal puntua 7 o mas. Subirlo a 9 triplico la esperanza (0.042 -> 0.138 en
 // BTC) y bajo el drawdown a la mitad. Intradia (_d) sin tocar: no se valido.
-f_minscore(_a,_d) => _a=='SOL'?(_d?6:9): _a=='ORO'?(_d?5:9):(_d?5:9)
+f_minscore(_a,_d) => _a=='SOL'?(_d?6:9): _a=='ORO'?(_d?5:6):(_d?5:9)
 f_atrmin(_a,_d)   => _a=='SOL'?(_d?0.25:0.90): _a=='ORO'?(_d?0.05:0.25): _a=='ETH'?(_d?0.18:0.65):(_d?0.12:0.50)
 // CAMBIO VALIDADO 2 - ATR% maximo a 2.25 en swing de CRIPTO.
 // Hipotesis 10, la unica de quince que paso las tres pruebas:
@@ -91,7 +90,9 @@ f_volw(_a)        => _a=='ORO'?0.0: 1.0
 f_dir(_a)         => _a=='ORO'?'LONG':'AMBOS'
 
 isCustom  = i_asset == 'CUSTOM'
-eff_htf   = isCustom ? i_c_htf : (isSwing ? 'D' : '240')
+eff_htf   = isCustom ? i_c_htf : (isSwing ? (tf_sec >= 86400 ? 'W' : 'D') : '240')
+if timeframe.in_seconds(eff_htf) <= tf_sec
+    runtime.error('HTF debe ser superior al timeframe del gráfico')
 eff_adx   = isCustom ? i_c_adx : f_adx(i_asset, isDay)
 prof_adj  = i_profile=='CONSERVADOR'?1 : i_profile=='AGRESIVO'?-1 : 0
 eff_minsc = isCustom ? i_c_minscore : f_minscore(i_asset, isDay)
@@ -125,7 +126,7 @@ rsi    = ta.rsi(close, 14)
 volsma = ta.sma(volume, 20)
 
 // [v14] Una sola llamada request.security (antes eran dos + ema50_src duplicado)
-[htfClose, htfEma] = request.security(syminfo.tickerid, eff_htf, [close[1], ema50[1]], lookahead=barmerge.lookahead_off)
+[htfClose, htfEma] = request.security(syminfo.tickerid, eff_htf, [close[1], ema50[1]], lookahead=barmerge.lookahead_on)
 htf_na       = na(htfClose) or na(htfEma)
 htf_bull     = not htf_na and htfClose > htfEma
 htf_bear     = not htf_na and htfClose < htfEma
@@ -233,6 +234,11 @@ i_tp2_pct     = input.int(30,'TP2 % cierre', minval=1, maxval=99, group='7. Ries
 i_lev         = input.float(1.0,'Apalancamiento', minval=1, step=1, group='7. Riesgo')
 i_expo        = input.float(25,'Exposicion max %', step=1, group='7. Riesgo')
 
+if i_tp1_pct + i_tp2_pct >= 100
+    runtime.error('TP1 + TP2 debe ser menor que 100 para conservar runner')
+if i_min_sl_atr <= 0 or i_max_sl_atr < i_min_sl_atr or eff_risk <= 0 or i_expo <= 0
+    runtime.error('Límites de riesgo inválidos')
+
 // [v14] --- Cortacircuitos de riesgo ---
 i_use_daily_dd  = input.bool(true, 'Cortar por pérdida diaria', group='7. Riesgo')
 i_max_dd_day    = input.float(3.0, 'Max pérdida diaria %', step=0.5, group='7. Riesgo')
@@ -270,9 +276,12 @@ dist_short   = math.max(atr*i_min_sl_atr, math.min(atr*i_max_sl_atr, sl_short_ra
 equity = strategy.equity
 f_qty(_dist) =>
     cash = equity * eff_risk / 100.0
-    qr   = f_safe_div(cash * i_lev, _dist)
-    cap  = f_safe_div(equity * i_expo/100.0 * i_lev, close)
-    math.max(0.0, math.min(qr, cap))
+    risk_symbol = strategy.convert_to_symbol(cash)
+    exposure_symbol = strategy.convert_to_symbol(equity * i_expo / 100.0)
+    qr = f_safe_div(risk_symbol, _dist * syminfo.pointvalue)
+    cap = f_safe_div(exposure_symbol * i_lev, close * syminfo.pointvalue)
+    step_qty = syminfo.mincontract
+    math.floor(math.max(0.0, math.min(qr, cap)) / step_qty) * step_qty
 qty_long  = f_qty(dist_long)
 qty_short = f_qty(dist_short)
 
@@ -282,80 +291,73 @@ qty_short = f_qty(dist_short)
 base_ok   = barstate.isconfirmed and regime_ok and session_ok and cooldown_ok and not risk_block and strategy.position_size == 0
 short_req = oro_short_strict ? eff_minsc + 2 : eff_minsc
 
-enter_long  = base_ok and allow_long  and trend_long  and macro_long  and htf_ok_long  and trig_long  and sw_conf_long  and score_long  >= eff_minsc  and dist_long  > 0 and qty_long  > 0
-enter_short = base_ok and allow_short and trend_short and macro_short and htf_ok_short and trig_short and sw_conf_short and score_short >= short_req and dist_short > 0 and qty_short > 0
+f_valid_parts(_qty) => math.floor(_qty * i_tp1_pct / 100.0 / syminfo.mincontract) >= 1 and math.floor(_qty * i_tp2_pct / 100.0 / syminfo.mincontract) >= 1
+enter_long  = base_ok and allow_long  and trend_long  and macro_long  and htf_ok_long  and trig_long  and sw_conf_long  and score_long  >= eff_minsc  and dist_long  > 0 and f_valid_parts(qty_long)
+enter_short = base_ok and allow_short and trend_short and macro_short and htf_ok_short and trig_short and sw_conf_short and score_short >= short_req and dist_short > 0 and f_valid_parts(qty_short)
 
-// [v14] Payload JSON para bots (entrada lleva SL + TP1/2/3 → el bot arma el bracket)
-sl_long_now  = close - dist_long
-sl_short_now = close + dist_short
-msg_long  = '{"action":"buy","ticker":"'  + syminfo.ticker + '","qty":' + str.tostring(qty_long, '#.########')  + ',"entry":' + str.tostring(close, format.mintick) + ',"sl":' + str.tostring(sl_long_now, format.mintick)  + ',"tp1":' + str.tostring(close + eff_tp1*dist_long, format.mintick) + ',"tp2":' + str.tostring(close + eff_tp2*dist_long, format.mintick) + ',"tp3":' + str.tostring(close + eff_tp3*dist_long, format.mintick) + '}'
-msg_short = '{"action":"sell","ticker":"' + syminfo.ticker + '","qty":' + str.tostring(qty_short, '#.########') + ',"entry":' + str.tostring(close, format.mintick) + ',"sl":' + str.tostring(sl_short_now, format.mintick) + ',"tp1":' + str.tostring(close - eff_tp1*dist_short, format.mintick) + ',"tp2":' + str.tostring(close - eff_tp2*dist_short, format.mintick) + ',"tp3":' + str.tostring(close - eff_tp3*dist_short, format.mintick) + '}'
+// Alert contract v1: strategy owns exits. Consumer applies order fills once per event.
+f_message(_action, _event, _qty, _entry, _risk) =>
+    '{"version":1,"owner":"strategy","action":"' + _action + '","event":"' + _event + '","instrument":"' + syminfo.tickerid + '","timeframe":"' + timeframe.period + '","key":"' + syminfo.tickerid + ':' + timeframe.period + ':' + str.tostring(time) + ':' + _event + '","qty":' + str.tostring(_qty, '#.########') + ',"reference_price":' + str.tostring(_entry, format.mintick) + ',"risk_distance":' + str.tostring(_risk, format.mintick) + ',"tp1_pct":' + str.tostring(i_tp1_pct) + ',"tp2_pct":' + str.tostring(i_tp2_pct) + '}'
 
-if enter_long
-    strategy.entry('L', strategy.long, qty=qty_long, alert_message=msg_long)
-    last_entry   := bar_index
-    trades_today := trades_today + 1
-if enter_short
-    strategy.entry('S', strategy.short, qty=qty_short, alert_message=msg_short)
-    last_entry   := bar_index
-    trades_today := trades_today + 1
-
-// ============================================================================
-// GESTIÓN DE POSICIÓN (TP escalonados, breakeven, trailing, salida defensiva)
-// ============================================================================
-var float entry_px  = na
+var float entry_px = na
 var float risk_unit = na
-var int   entry_dir = 0
-var bool  tp1_done  = false
+var float entry_qty = na
+var float active_stop = na
+var int entry_dir = 0
+var bool tp1_done = false
+var bool tp2_done = false
+var int processed_closed = 0
+if strategy.closedtrades > processed_closed
+    for t = processed_closed to strategy.closedtrades - 1
+        exit_id = strategy.closedtrades.exit_id(t)
+        tp1_done := tp1_done or exit_id == 'TP1'
+        tp2_done := tp2_done or exit_id == 'TP2'
+    processed_closed := strategy.closedtrades
 
-if strategy.position_size != 0 and strategy.position_size[1] == 0
-    entry_px  := strategy.position_avg_price
-    entry_dir := strategy.position_size > 0 ? 1 : -1
-    risk_unit := strategy.position_size > 0 ? dist_long : dist_short
-    tp1_done  := false
+// Freeze signal geometry; submit bracket in the same evaluation as entry.
+if enter_long or enter_short
+    entry_dir := enter_long ? 1 : -1
+    entry_px := close
+    risk_unit := enter_long ? dist_long : dist_short
+    entry_qty := enter_long ? qty_long : qty_short
+    active_stop := entry_px - entry_dir * risk_unit
+    tp1_done := false
+    tp2_done := false
+    strategy.entry(entry_dir == 1 ? 'L' : 'S', entry_dir == 1 ? strategy.long : strategy.short, qty=entry_qty, alert_message=f_message(entry_dir == 1 ? 'buy' : 'sell', 'entry', entry_qty, entry_px, risk_unit))
+    last_entry := bar_index
+    trades_today += 1
 
-inLong  = strategy.position_size > 0
+inLong = strategy.position_size > 0
 inShort = strategy.position_size < 0
-
-tp1_px = entry_dir==1 ? entry_px + eff_tp1*risk_unit : entry_px - eff_tp1*risk_unit
-tp2_px = entry_dir==1 ? entry_px + eff_tp2*risk_unit : entry_px - eff_tp2*risk_unit
-tp3_px = entry_dir==1 ? entry_px + eff_tp3*risk_unit : entry_px - eff_tp3*risk_unit
-
-chand_long  = ta.highest(high, i_chand_lb) - atr*eff_trail
-chand_short = ta.lowest(low,  i_chand_lb) + atr*eff_trail
-be_long     = entry_px + i_be_r*risk_unit
-be_short    = entry_px - i_be_r*risk_unit
-
-// [v14] Fix breakeven: activo en la MISMA barra que toca TP1 (sin retraso)
-tp1_hit_now = (inLong and high >= tp1_px) or (inShort and low <= tp1_px)
-tp1_active  = tp1_done or tp1_hit_now
-
-stop_long  = tp1_active ? math.max(be_long,  chand_long)  : (entry_px - risk_unit)
-stop_short = tp1_active ? math.min(be_short, chand_short) : (entry_px + risk_unit)
-
-def_long  = inLong  and not tp1_active and close < ema20 and macdH < macdH[1] and rsi < rsi[1]
-def_short = inShort and not tp1_active and close > ema20 and macdH > macdH[1] and rsi > rsi[1]
-
-if inLong
-    strategy.exit('TP1','L', qty_percent=i_tp1_pct, limit=tp1_px, stop=stop_long)
-    strategy.exit('TP2','L', qty_percent=i_tp2_pct, limit=tp2_px, stop=stop_long)
-    strategy.exit('TP3','L', limit=tp3_px, stop=stop_long)
-    if def_long
-        strategy.close('L', comment='DEF', alert_message='{"action":"close","ticker":"'+syminfo.ticker+'","reason":"momentum_lost"}')
-if inShort
-    strategy.exit('TP1','S', qty_percent=i_tp1_pct, limit=tp1_px, stop=stop_short)
-    strategy.exit('TP2','S', qty_percent=i_tp2_pct, limit=tp2_px, stop=stop_short)
-    strategy.exit('TP3','S', limit=tp3_px, stop=stop_short)
-    if def_short
-        strategy.close('S', comment='DEF', alert_message='{"action":"close","ticker":"'+syminfo.ticker+'","reason":"momentum_lost"}')
-
-if inLong  and high >= tp1_px
-    tp1_done := true
-if inShort and low  <= tp1_px
-    tp1_done := true
-if strategy.position_size == 0
+tp1_px = entry_px + entry_dir * eff_tp1 * risk_unit
+tp2_px = entry_px + entry_dir * eff_tp2 * risk_unit
+tp3_px = entry_px + entry_dir * eff_tp3 * risk_unit
+chand_long = ta.highest(high, i_chand_lb) - atr * eff_trail
+chand_short = ta.lowest(low, i_chand_lb) + atr * eff_trail
+// Activate BE only after a recorded partial fill; no high/low touch assumption.
+if (inLong or inShort) and tp1_done
+    candidate = entry_dir == 1 ? math.max(entry_px + i_be_r * risk_unit, chand_long) : math.min(entry_px - i_be_r * risk_unit, chand_short)
+    active_stop := entry_dir == 1 ? math.max(active_stop, candidate) : math.min(active_stop, candidate)
+stop_long = active_stop
+stop_short = active_stop
+if inLong or inShort or enter_long or enter_short
+    order_id = entry_dir == 1 ? 'L' : 'S'
+    exit_action = entry_dir == 1 ? 'sell' : 'buy'
+    q1 = math.floor(entry_qty * i_tp1_pct / 100.0 / syminfo.mincontract) * syminfo.mincontract
+    q2 = math.floor(entry_qty * i_tp2_pct / 100.0 / syminfo.mincontract) * syminfo.mincontract
+    q3 = math.round((entry_qty - q1 - q2) / syminfo.mincontract) * syminfo.mincontract
+    if not tp1_done
+        strategy.exit('TP1', order_id, qty=q1, limit=tp1_px, stop=active_stop, alert_message=f_message(exit_action, 'exit1', q1, entry_px, risk_unit))
+    if not tp2_done
+        strategy.exit('TP2', order_id, qty=q2, limit=tp2_px, stop=active_stop, alert_message=f_message(exit_action, 'exit2', q2, entry_px, risk_unit))
+    strategy.exit('TP3', order_id, qty=q3, limit=tp3_px, stop=active_stop, alert_message=f_message(exit_action, 'exit3', q3, entry_px, risk_unit))
+    defensive = not tp1_done and ((inLong and close < ema20 and macdH < macdH[1] and rsi < rsi[1]) or (inShort and close > ema20 and macdH > macdH[1] and rsi > rsi[1]))
+    if defensive
+        strategy.close(order_id, comment='DEF', alert_message=f_message(exit_action, 'defensive', math.abs(strategy.position_size), entry_px, risk_unit))
+if strategy.position_size == 0 and not (enter_long or enter_short)
     entry_dir := 0
-    tp1_done  := false
+    tp1_done := false
+    tp2_done := false
 
 // ============================================================================
 // 8. VISUAL — SL / TP
@@ -429,8 +431,8 @@ f_sessionbox(_active, _show, _col, _name, _keep) =>
     if _show and started
         hi := high
         lo := low
-        sm := close
-        ct := 1
+        sm := 0.0
+        ct := 0
         sb := bar_index
         bx := box.new(bar_index, high, bar_index, low, border_color=_col, border_width=1, bgcolor=color.new(_col, 90))
         lb := label.new(bar_index, low, _name, style=label.style_none, textcolor=_col, size=size.small)
@@ -470,7 +472,7 @@ bgcolor(i_show_reg_bg ? bg_regime : na)
 // ============================================================================
 var table p = table.new(position.top_right, 2, 5, border_width=1)
 if barstate.islast
-    table.cell(p,0,0,'CB v14.0', text_color=color.white, bgcolor=color.new(color.blue,0))
+    table.cell(p,0,0,'CB v15.1', text_color=color.white, bgcolor=color.new(color.blue,0))
     table.cell(p,1,0,i_asset+' '+modeStr, text_color=color.white, bgcolor=color.new(color.blue,0))
     table.cell(p,0,1,'Score L/S')
     table.cell(p,1,1,str.tostring(score_long)+'/'+str.tostring(score_short))
@@ -498,7 +500,7 @@ if barstate.islast
     c_pf  = _pf >= 2.0 ? color.new(color.green,60) : _pf >= 1.5 ? color.new(color.orange,60) : color.new(color.red,60)
     c_wr  = _wr >= 55  ? color.new(color.green,60) : _wr >= 45  ? color.new(color.orange,60) : color.new(color.red,60)
     table.cell(m,0,0,'MÉTRICAS', text_color=color.white, bgcolor=color.new(color.purple,0))
-    table.cell(m,1,0,'v14.0', text_color=color.white, bgcolor=color.new(color.purple,0))
+    table.cell(m,1,0,'v15.1', text_color=color.white, bgcolor=color.new(color.purple,0))
     table.cell(m,0,1,'Trades')
     table.cell(m,1,1,str.tostring(_tot))
     table.cell(m,0,2,'Win %')
@@ -534,5 +536,5 @@ if i_show_clock and barstate.islast
 // ============================================================================
 // Estáticas (compatibilidad). Para bots usa el alert_message JSON de las órdenes:
 // crea la alerta sobre la estrategia y usa {{strategy.order.alert_message}}.
-alertcondition(enter_long,  'CB v14 Long',  'CB v14 LONG')
-alertcondition(enter_short, 'CB v14 Short', 'CB v14 SHORT')
+alertcondition(enter_long,  'CB v15 Long',  'CB v15 LONG')
+alertcondition(enter_short, 'CB v15 Short', 'CB v15 SHORT')

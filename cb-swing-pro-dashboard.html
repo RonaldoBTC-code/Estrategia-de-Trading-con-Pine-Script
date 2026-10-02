@@ -166,6 +166,7 @@ body{
 </style>
 </head>
 <body>
+<p style="padding:12px;color:#E4B45E">Demostración local. Datos Binance o simulados; HTF aproximado de 5 minutos, no Pine 4H. PnL neto estimado con comisión 0,08% por lado y deslizamiento de 2 puntos básicos por lado. No valida rentabilidad ni ejecuta órdenes.</p>
 <div class="app">
 
   <!-- TOPBAR -->
@@ -298,7 +299,7 @@ const PRESETS = {
   ORO:{sym:'PAXGUSDT',adx:14, minScore:5, atrMin:0.03, atrMax:1.2, risk:0.8, tp:[1.0,1.9,3.2], trail:1.4, vol:0, dir:'LONG', dec:2},
 };
 const CFG = { compressK:0.5, pbLen:6, slAtr:1.5, minSlAtr:0.6, maxSlAtr:4.0, structBuf:0.20,
-  chandLb:22, beR:0.2, tp1pct:0.40, tp2pct:0.30, expo:25, cooldown:4, seedBars:480 };
+  chandLb:22, beR:0.2, tp1pct:0.40, tp2pct:0.30, expo:25, cooldown:4, seedBars:480, commission:0.0008, slippageBps:2 };
 
 let P = PRESETS.BTC;
 let candles = [];           // {time,open,high,low,close,volume}
@@ -306,6 +307,9 @@ let pos = null;             // posición abierta
 let trades = [];            // trades cerrados {pnl,dir,r}
 let equity = 10000, startEq = 10000, peakEq = 10000, maxDD = 0;
 let eqSeries = [];          // curva realizada
+let barNumber = -1, generation = 0, fetchController = null, reconnectTimer = null, reconnectAttempts = 0;
+let randomState = 123456789;
+function random(){randomState=(Math.imul(1664525,randomState)+1013904223)>>>0;return randomState/4294967296;}
 let lastEntryBar = -999, consecLosses = 0;
 let lastClose = null, ws = null, simTimer = null, live = false;
 
@@ -313,8 +317,15 @@ let lastClose = null, ws = null, simTimer = null, live = false;
 const emaArr=(src,len)=>{const k=2/(len+1),o=[];let e=src[0];for(let i=0;i<src.length;i++){e=i?src[i]*k+e*(1-k):src[i];o[i]=e;}return o;};
 function atrArr(c,len){const tr=[];for(let i=0;i<c.length;i++){const h=c[i].high,l=c[i].low,pc=i?c[i-1].close:c[i].close;tr[i]=Math.max(h-l,Math.abs(h-pc),Math.abs(l-pc));}
   const o=[];let a=tr[0];for(let i=0;i<tr.length;i++){a=i?(a*(len-1)+tr[i])/len:tr[i];o[i]=a;}return o;}
-function rsiArr(src,len){const o=[];let ag=0,al=0;for(let i=0;i<src.length;i++){if(i===0){o[i]=50;continue;}const ch=src[i]-src[i-1],g=Math.max(ch,0),ls=Math.max(-ch,0);
-  ag=i<=len?(ag+g):(ag*(len-1)+g)/len;al=i<=len?(al+ls):(al*(len-1)+ls)/len;const rs=al===0?100:ag/al;o[i]=al===0?100:100-100/(1+rs);}return o;}
+function rsiArr(src,len){
+  const out=Array(src.length).fill(NaN); let gain=0,loss=0;
+  for(let i=1;i<src.length;i++){
+    const delta=src[i]-src[i-1],g=Math.max(delta,0),l=Math.max(-delta,0);
+    if(i<=len){gain+=g;loss+=l;if(i<len)continue;gain/=len;loss/=len;}
+    else{gain=(gain*(len-1)+g)/len;loss=(loss*(len-1)+l)/len;}
+    out[i]=loss===0?(gain===0?50:100):100-100/(1+gain/loss);
+  }return out;
+}
 function macdArr(src){const f=emaArr(src,12),s=emaArr(src,26),m=src.map((_,i)=>f[i]-s[i]),sig=emaArr(m,9);return{m,sig,h:m.map((v,i)=>v-sig[i])};}
 function dmiArr(c,len){const pdm=[],ndm=[],tr=[];for(let i=0;i<c.length;i++){if(i===0){pdm[i]=0;ndm[i]=0;tr[i]=c[i].high-c[i].low;continue;}
   const up=c[i].high-c[i-1].high,dn=c[i-1].low-c[i].low;pdm[i]=up>dn&&up>0?up:0;ndm[i]=dn>up&&dn>0?dn:0;
@@ -334,7 +345,7 @@ function evaluate(){
   const src=candles.map(c=>c.close);
   const e20=emaArr(src,20), e50=emaArr(src,50), e200=emaArr(src,200);
   const atr=atrArr(candles,14), rsi=rsiArr(src,14), mc=macdArr(src), dm=dmiArr(candles,14);
-  // HTF proxy: EMA50 sobre serie submuestreada 5x (sin mirar al futuro)
+  // DEMO HTF proxy (no equivale a Pine 4H): EMA50 sobre serie submuestreada 5x (sin mirar al futuro)
   const htfSrc=[]; for(let i=0;i<n;i+=5) htfSrc.push(src[i]);
   const htfE=emaArr(htfSrc,50); const htfEma=htfE[htfE.length-1], htfPx=htfSrc[htfSrc.length-1];
   const i=n-1, c=candles[i];
@@ -371,7 +382,7 @@ function evaluate(){
   const qtyL=sizeQty(distL), qtyS=sizeQty(distS);
 
   const allowL=P.dir==='LONG'||P.dir==='BOTH', allowS=P.dir==='SHORT'||P.dir==='BOTH';
-  const cdOk=(i-lastEntryBar)>=CFG.cooldown;
+  const cdOk=(barNumber-lastEntryBar)>=CFG.cooldown;
   const flat=!pos;
   const baseOk=regime&&cdOk&&flat;
   const shortReq=P.sym==='PAXGUSDT'?P.minScore+2:P.minScore;
@@ -397,17 +408,19 @@ function onBarClose(st){
     const beL=pos.entry+CFG.beR*pos.risk, beS=pos.entry-CFG.beR*pos.risk;
     const stop=pos.dir>0 ? (pos.tp1?Math.max(beL,chandL):pos.entry-pos.risk)
                          : (pos.tp1?Math.min(beS,chandS):pos.entry+pos.risk);
-    pos.stop=stop;
+    // The stop active during this bar was placed after the previous close.
+    const effectiveStop=pos.stop;
+    const nextStop=pos.dir>0?Math.max(pos.stop,stop):Math.min(pos.stop,stop);
     let closed=false;
     if(pos.dir>0){
-      if(c.low<=stop){ realize(stop,pos.rem,'SL'); closed=true; }
+      if(c.low<=effectiveStop){ realize(effectiveStop,pos.rem,'SL'); closed=true; }
       else{
         if(!pos.tp1&&c.high>=pos.tps[0]){ realize(pos.tps[0],pos.qty*CFG.tp1pct,'TP1'); pos.rem-=pos.qty*CFG.tp1pct; pos.tp1=true; logEv('exit','TP1','TP1 alcanzado · 40% cerrado · stop→BE'); }
         if(!pos.tp2&&c.high>=pos.tps[1]){ realize(pos.tps[1],pos.qty*CFG.tp2pct,'TP2'); pos.rem-=pos.qty*CFG.tp2pct; pos.tp2=true; logEv('exit','TP2','TP2 alcanzado · 30% cerrado'); }
         if(!pos.tp3&&c.high>=pos.tps[2]){ realize(pos.tps[2],pos.rem,'TP3'); pos.rem=0; pos.tp3=true; closed=true; logEv('exit','TP3','TP3 · runner cerrado'); }
       }
     }else{
-      if(c.high>=stop){ realize(stop,pos.rem,'SL'); closed=true; }
+      if(c.high>=effectiveStop){ realize(effectiveStop,pos.rem,'SL'); closed=true; }
       else{
         if(!pos.tp1&&c.low<=pos.tps[0]){ realize(pos.tps[0],pos.qty*CFG.tp1pct,'TP1'); pos.rem-=pos.qty*CFG.tp1pct; pos.tp1=true; logEv('exit','TP1','TP1 alcanzado · 40% cerrado · stop→BE'); }
         if(!pos.tp2&&c.low<=pos.tps[1]){ realize(pos.tps[1],pos.qty*CFG.tp2pct,'TP2'); pos.rem-=pos.qty*CFG.tp2pct; pos.tp2=true; logEv('exit','TP2','TP2 alcanzado · 30% cerrado'); }
@@ -420,14 +433,15 @@ function onBarClose(st){
       if(def){ realize(c.close,pos.rem,'DEF'); closed=true; logEv('warn','DEF','Momentum perdido · salida defensiva'); }
     }
     if(closed||pos.rem<=1e-9){ finalizeTrade(); }
+    else { pos.stop=nextStop; }
   }
   // ---- nuevas entradas ----
   if(!pos && (st.enterL||st.enterS)){
     const dir=st.enterL?1:-1, dist=dir>0?st.distL:st.distS, qty=dir>0?st.qtyL:st.qtyS;
     const tps=[0,1,2].map(k=>dir>0?c.close+P.tp[k]*dist:c.close-P.tp[k]*dist);
-    pos={dir,entry:c.close,risk:dist,qty,rem:qty,tps,tp1:false,tp2:false,tp3:false,
+    pos={dir,entry:c.close*(1+dir*CFG.slippageBps/10000),risk:dist,qty,rem:qty,tps,tp1:false,tp2:false,tp3:false,
       stop:dir>0?c.close-dist:c.close+dist,realized:0,openTime:c.time,markTime:c.time};
-    lastEntryBar=i;
+    lastEntryBar=barNumber;
     addMarker(c.time,dir>0?'belowBar':'aboveBar',dir>0?'#16C784':'#F0616D',dir>0?'arrowUp':'arrowDown',dir>0?'L':'S');
     logEv(dir>0?'long':'short',dir>0?'LONG':'SHORT',
       (dir>0?'Entrada LONG':'Entrada SHORT')+' · score '+(dir>0?st.scL:st.scS)+' · '+qty.toFixed(P.dec===2?3:2)+' @ '+fmt(c.close));
@@ -436,7 +450,9 @@ function onBarClose(st){
   updateEqPoint();
 }
 function realize(px,q,tag){
-  const pnl=(px-pos.entry)*q*pos.dir;
+  const entryCost=pos.entry*q*CFG.commission;
+  const exitPx=px*(1-pos.dir*CFG.slippageBps/10000);
+  const pnl=(exitPx-pos.entry)*q*pos.dir-entryCost-exitPx*q*CFG.commission;
   equity+=pnl; pos.realized+=pnl;
   peakEq=Math.max(peakEq,equity);
   maxDD=Math.max(maxDD,(peakEq-equity)/peakEq*100);
@@ -545,7 +561,7 @@ function renderPipe(st){
       {k:'TP1',v:pos.tp1?'✓':'—',s:pos.tp1?'ok':''},
     ]);
   }else{
-    setStage('position','wait','FLAT',[{k:'Cooldown',v:Math.max(0,CFG.cooldown-(st.i-lastEntryBar))+'b'},{k:'Racha L',v:consecLosses}]);
+    setStage('position','wait','FLAT',[{k:'Cooldown',v:Math.max(0,CFG.cooldown-(barNumber-lastEntryBar))+'b'},{k:'Racha L',v:consecLosses}]);
   }
   // pulso de flujo cuando entra
   if(st.enterL||st.enterS){
@@ -562,9 +578,9 @@ function renderMetrics(){
   const pf=gl?gp/gl:(gp>0?99:0), wr=tot?wins/tot*100:0, net=(equity-startEq)/startEq*100;
   const col=(v,a,b)=>v>=a?'var(--long)':v>=b?'var(--gold)':'var(--short)';
   document.getElementById('metrics').innerHTML=[
-    ['Profit Factor',pf.toFixed(2),'objetivo ≥ 2.0',col(pf,2,1.5)],
+    ['Profit Factor',pf.toFixed(2),'Demo; no backtest Pine',col(pf,2,1.5)],
     ['Win rate',wr.toFixed(1)+'%',wins+'/'+tot+' trades',col(wr,55,45)],
-    ['Net P&L',(net>=0?'+':'')+net.toFixed(1)+'%','$'+equity.toFixed(0),net>=0?'var(--long)':'var(--short)'],
+    ['PnL neto estimado',(net>=0?'+':'')+net.toFixed(1)+'%','$'+equity.toFixed(0),net>=0?'var(--long)':'var(--short)'],
     ['Max drawdown','-'+maxDD.toFixed(1)+'%','pico $'+peakEq.toFixed(0),maxDD<=15?'var(--long)':maxDD<=25?'var(--gold)':'var(--short)'],
   ].map(m=>'<div class="metric"><span class="lbl">'+m[0]+'</span><span class="val" style="color:'+m[3]+'">'+m[1]+'</span><span class="sub">'+m[2]+'</span></div>').join('');
   document.getElementById('tradeCount').textContent=tot+' trades';
@@ -617,7 +633,7 @@ function setConn(state){
   const pill=document.getElementById('connPill'),txt=document.getElementById('connTxt'),dot=document.getElementById('statusDot');
   live=state==='live';
   pill.className='conn-pill '+(live?'live':'sim');
-  txt.textContent=live?'LIVE · BINANCE':'SIM · LOCAL';
+  txt.textContent=live?'DATOS BINANCE · DEMO':state==='reconnecting'?'RECONECTANDO · DEMO':'SIM · LOCAL · DEMO';
   dot.className='pulse-dot'+(live?'':' sim');
 }
 
@@ -625,6 +641,9 @@ function setConn(state){
 //  Ciclo de barra (cerrar vela → evaluar → gestionar → render)
 // ============================================================================
 function pushClosedBar(bar){
+  const last=candles[candles.length-1];
+  if(last && bar.time<=last.time)return false;
+  barNumber++;
   candles.push(bar); if(candles.length>620)candles.shift();
   const st=evaluate(); if(!st)return;
   onBarClose(st);
@@ -642,31 +661,34 @@ function renderPipePosOnly(){ // actualiza sólo Open PnL en vivo
 // ============================================================================
 //  Fuente de datos: Binance (REST seed + WS) con fallback a simulador
 // ============================================================================
-async function boot(presetKey){
-  // reset
-  P=PRESETS[presetKey];
+function resetEngine(){
   candles=[];pos=null;trades=[];equity=startEq;peakEq=startEq;maxDD=0;eqSeries=[];
-  lastEntryBar=-999;consecLosses=0;lastClose=null;markers=[];clearPosLines();
-  logEl.innerHTML='';
-  document.getElementById('symLabel').textContent=P.sym;
+  barNumber=-1;lastEntryBar=-999;consecLosses=0;lastClose=null;markers=[];clearPosLines();
+}
+async function loadBars(preset,signal,start){
+  const url='https://api.binance.com/api/v3/klines?symbol='+preset.sym+'&interval=1m&limit=1000'+(start?'&startTime='+start:'');
+  const r=await fetch(url,{signal});if(!r.ok)throw new Error('HTTP '+r.status);
+  const raw=await r.json(),now=Date.now();
+  return raw.filter(k=>Number(k[6])<now).map(k=>({time:Math.floor(k[0]/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));
+}
+async function boot(presetKey){
+  const session=++generation,preset=PRESETS[presetKey];if(!preset)throw new Error('Preset inválido');
+  if(fetchController)fetchController.abort();fetchController=new AbortController();
+  clearTimeout(reconnectTimer);clearInterval(simTimer);simTimer=null;
+  if(ws){ws.onclose=null;ws.close();ws=null;}
+  P=preset;resetEngine();reconnectAttempts=0;
+  logEl.innerHTML='';document.getElementById('symLabel').textContent=P.sym;
   document.querySelectorAll('#presets button').forEach(b=>b.classList.toggle('on',b.dataset.p===presetKey));
-  if(ws){try{ws.close();}catch(e){}ws=null;}
-  if(simTimer){clearInterval(simTimer);simTimer=null;}
-  logEv('info','BOOT','Cargando '+P.sym+' · sembrando '+CFG.seedBars+' velas…');
-
-  let seeded=false;
+  setConn('reconnecting');
   try{
-    const r=await fetch('https://api.binance.com/api/v3/klines?symbol='+P.sym+'&interval=1m&limit='+CFG.seedBars);
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    const raw=await r.json();
-    const seed=raw.map(k=>({time:Math.floor(k[0]/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]}));
-    runSeed(seed); seeded=true;
-    connectWS();
-    setConn('live');
-    logEv('info','LIVE','Conectado a Binance · stream 1m activo');
+    const seed=await loadBars(preset,fetchController.signal);
+    if(session!==generation)return;
+    if(!seed.length)throw new Error('Sin velas cerradas');
+    runSeed(seed.slice(-CFG.seedBars));connectWS(session,preset);
   }catch(e){
-    logEv('warn','OFFLINE','Binance no accesible aquí · usando simulador local');
-    seedSim(); startSim(); setConn('sim');
+    if(session!==generation||e.name==='AbortError')return;
+    resetEngine();seedSim();startSim();setConn('sim');
+    logEv('warn','SIM','Datos sintéticos independientes; métricas de demostración');
   }
 }
 // procesa el histórico semilla de golpe (backfill de equity/markers/eventos)
@@ -678,7 +700,7 @@ function runSeed(seed){
   // corre el motor sobre el histórico (silencioso salvo entradas/salidas)
   const saved=candles; candles=[];
   for(let i=0;i<saved.length;i++){
-    candles.push(saved[i]); if(candles.length<210)continue;
+    candles.push(saved[i]);barNumber++; if(candles.length<210)continue;
     const st=evaluate(); if(!st)continue; onBarClose(st);
   }
   candleS.setMarkers(markers.slice(-40));
@@ -686,23 +708,46 @@ function runSeed(seed){
   setPrice(candles[candles.length-1].close);
   logEv('info','READY','Motor listo · '+trades.length+' trades en histórico');
 }
-function connectWS(){
-  ws=new WebSocket('wss://stream.binance.com:9443/ws/'+P.sym.toLowerCase()+'@kline_1m');
-  ws.onmessage=ev=>{
-    const k=JSON.parse(ev.data).k; if(!k)return;
-    const bar={time:Math.floor(k.t/1000),open:+k.o,high:+k.h,low:+k.l,close:+k.c,volume:+k.v};
-    if(k.x){ pushClosedBar(bar); } else { refreshLiveBar(bar); }
+function connectWS(session=generation,preset=P){
+  const socket=new WebSocket('wss://stream.binance.com:9443/ws/'+preset.sym.toLowerCase()+'@kline_1m');ws=socket;
+  const current=()=>session===generation&&ws===socket;
+  socket.onopen=()=>{if(current()){reconnectAttempts=0;setConn('live');}};
+  socket.onmessage=ev=>{
+    if(!current())return;
+    try{
+      const k=JSON.parse(ev.data).k;if(!k||k.s!==preset.sym)return;
+      const bar={time:Math.floor(k.t/1000),open:+k.o,high:+k.h,low:+k.l,close:+k.c,volume:+k.v};
+      const last=candles[candles.length-1];
+      if(last&&bar.time<last.time)return;
+      if(k.x){if(last&&bar.time>last.time+60){socket.close();return;}pushClosedBar(bar);paintFull();setPrice(bar.close);}
+      else if(!last||bar.time>last.time)refreshLiveBar(bar);
+    }catch(e){logEv('warn','WS','Mensaje inválido descartado');}
   };
-  ws.onerror=()=>{ logEv('warn','WS','WebSocket caído · cambiando a simulador'); try{ws.close();}catch(e){} seedSim(true); startSim(); setConn('sim'); };
+  socket.onerror=()=>{if(current())socket.close();};
+  socket.onclose=()=>{
+    if(!current())return;setConn('reconnecting');
+    reconnectTimer=setTimeout(async()=>{
+      if(!current())return;
+      try{
+        const last=candles[candles.length-1];
+        const recovered=await loadBars(preset,fetchController.signal,last?(last.time+60)*1000:undefined);
+        if(!current())return;
+        for(const bar of recovered){const prev=candles[candles.length-1];if(prev&&bar.time>prev.time+60)throw new Error('Hueco sin recuperar');pushClosedBar(bar);}
+        const newest=candles[candles.length-1];
+        if(!newest||Date.now()/1000-newest.time>120)throw new Error('Histórico incompleto');
+        paintFull();connectWS(session,preset);
+      }catch(e){if(current())socket.onclose();}
+    },Math.min(30000,1000*2**Math.min(reconnectAttempts++,5)));
+  };
 }
 
 // ---------- Simulador (movimiento realista con fases de régimen) ----------
 let simPx, simRegime, simRegimeLeft, simVol, simForming, simTick, simBase;
-function seedSim(keep){
-  if(!keep){ candles=[]; markers=[]; }
+function seedSim(){
+  resetEngine();randomState=123456789;
   simBase = P.sym==='BTCUSDT'?63000:P.sym==='ETHUSDT'?3300:P.sym==='SOLUSDT'?150:2400;
   simPx=simBase; newRegime();
-  const now=Math.floor(Date.now()/1000), start=now-CFG.seedBars*60;
+  const now=Math.floor(Date.now()/60000)*60, start=now-CFG.seedBars*60;
   const seed=[];
   for(let i=0;i<CFG.seedBars;i++){
     const bar=simBar(start+i*60); seed.push(bar);
@@ -711,32 +756,32 @@ function seedSim(keep){
   simForming=null; simTick=0;
 }
 function newRegime(){
-  const r=Math.random(); simRegime=r<0.4?1:r<0.8?-1:0; // up / down / range
-  simRegimeLeft=40+Math.floor(Math.random()*70);
-  simVol=(0.0012+Math.random()*0.0022)*(simRegime===0?0.6:1.3);
+  const r=random(); simRegime=r<0.4?1:r<0.8?-1:0; // up / down / range
+  simRegimeLeft=40+Math.floor(random()*70);
+  simVol=(0.0012+random()*0.0022)*(simRegime===0?0.6:1.3);
 }
 function simBar(time){
   const o=simPx; let steps=6, h=o,l=o,c=o;
   for(let s=0;s<steps;s++){
     const drift=simRegime*simVol*0.5;
-    c=c*(1+drift+(Math.random()-0.5)*simVol*2);
+    c=c*(1+drift+(random()-0.5)*simVol*2);
     if(simRegime===0)c=c+(simBase-c)*0.02; // mean revert en rango
     h=Math.max(h,c);l=Math.min(l,c);
   }
   simPx=c;
   if(--simRegimeLeft<=0)newRegime();
-  const vol=1000*(0.6+Math.random()*1.4)*(simRegime?1.3:0.7);
+  const vol=1000*(0.6+random()*1.4)*(simRegime?1.3:0.7);
   return {time,open:o,high:h,low:l,close:c,volume:vol};
 }
 function startSim(){
   if(simTimer)clearInterval(simTimer);
   const barTicks=6; simTick=0;
-  const now=Math.floor(Date.now()/1000);
+  const now=Math.floor(Date.now()/60000)*60;
   simForming={time:now,open:simPx,high:simPx,low:simPx,close:simPx,volume:0};
   simTimer=setInterval(()=>{
     // mover precio dentro de la vela en formación
     const drift=simRegime*simVol*0.5;
-    simPx=simPx*(1+drift+(Math.random()-0.5)*simVol*2);
+    simPx=simPx*(1+drift+(random()-0.5)*simVol*2);
     if(simRegime===0)simPx=simPx+(simBase-simPx)*0.02;
     simForming.high=Math.max(simForming.high,simPx);
     simForming.low=Math.min(simForming.low,simPx);

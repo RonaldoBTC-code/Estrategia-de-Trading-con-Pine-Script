@@ -1,0 +1,17 @@
+{
+  "name": "Estrategia de Trading con Pine Script",
+  "install": "python3 --version && node --version",
+  "terminals": [
+    {
+      "name": "dashboard",
+      "command": "python3 -m http.server 8000 --bind 0.0.0.0",
+      "description": "Serves the repo statically so cb-swing-pro-dashboard.html can be opened at http://localhost:8000/cb-swing-pro-dashboard.html"
+    }
+  ],
+  "ports": [
+    {
+      "name": "dashboard",
+      "port": 8000
+    }
+  ]
+}

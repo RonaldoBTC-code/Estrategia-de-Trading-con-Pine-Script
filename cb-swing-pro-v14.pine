@@ -15,7 +15,7 @@
 //   [v14] Tabla de métricas EN VIVO: PF, win rate, trades, net %, max DD %, racha.
 //   [v14] Alertas JSON con SL/TP para automatización con bots (alert_message).
 // ----------------------------------------------------------------------------
-// NO REPINTA: el HTF usa close[1]/ema50[1] con lookahead_off. Verificación en README.
+// NO REPINTA: el HTF usa close[1]/ema50[1] con lookahead_on (patrón oficial). Verificación en README.
 // USO EDUCATIVO. No es asesoría financiera. Opera con capital que puedas perder.
 // ============================================================================
 
@@ -112,7 +112,9 @@ rsi    = ta.rsi(close, 14)
 volsma = ta.sma(volume, 20)
 
 // [v14] Una sola llamada request.security (antes eran dos + ema50_src duplicado)
-[htfClose, htfEma] = request.security(syminfo.tickerid, eff_htf, [close[1], ema50[1]], lookahead=barmerge.lookahead_off)
+// [fix-HTF] Patrón oficial sin repintado: expr[1] + lookahead_on (ambos son interdependientes;
+//           quitar el [1] con lookahead_on = fuga de futuro). Así histórico y vivo ven la última vela HTF cerrada.
+[htfClose, htfEma] = request.security(syminfo.tickerid, eff_htf, [close[1], ema50[1]], lookahead=barmerge.lookahead_on)
 htf_na       = na(htfClose) or na(htfEma)
 htf_bull     = not htf_na and htfClose > htfEma
 htf_bear     = not htf_na and htfClose < htfEma

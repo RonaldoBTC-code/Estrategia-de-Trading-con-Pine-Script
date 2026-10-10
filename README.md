@@ -210,3 +210,52 @@ La versión activa es `cb-swing-pro-v15.pine` con título v15.1. Incorpora corre
 El dashboard incorpora correcciones de RSI, cooldown, sesiones de datos y costes estimados. Sigue siendo una demostración con HTF aproximado; no es equivalente al backtest Pine. El nuevo contrato de alertas exige migrar el consumidor: la estrategia administra las salidas y el bot no debe crear un segundo bracket.
 
 [Correcciones, pruebas y pendientes para agentes](docs/audits/2026-10-02/corrections.md). Ejecutar `node tests/audit-regressions.cjs`. Pine v15.1 todavía requiere compilación y replay en TradingView; las cifras históricas anteriores no validan esta revisión.
+
+---
+
+## 🤝 El equipo detrás de este proyecto
+
+Este es un proyecto **educativo**. Lo desarrolla Ramoide junto con un equipo de agentes de IA, cada uno con un rol distinto. Las reglas son simples:
+
+- **Nadie opera.** Ningún agente opera ni toca cuentas reales.
+- **Nadie mergea.** Todo cambio llega como *pull request* y lo aprueba el dueño del proyecto.
+- **No hay ventaja demostrada**, y se dice abiertamente.
+- **No es consejo financiero.** Consulta el [Aviso de riesgo](#️-aviso-de-riesgo).
+
+### 🔄 Cómo trabajamos
+
+```mermaid
+flowchart LR
+    R["Ramoide<br/>objetivo y decisiones"] --> M["Maestro de Indicadores<br/>hipótesis"]
+    M --> A["Analista Cuantitativo<br/>pruebas"]
+    A --> P["Ingeniero Pine Script<br/>código"]
+    A --> B["Bot<br/>planes en papel"]
+    S["Seguridad<br/>revisa los PR"] -.-> P
+    S -.-> B
+    P --> R
+    B --> R
+```
+
+### 👥 Los roles
+
+**Maestro de Indicadores.** Es un agente de IA que estudia indicadores y videos de análisis técnico y los convierte en hipótesis que se pueden medir. Cada regla que se oye en un video se anota con su cita y su minuto, y se marca como no verificada hasta que el Analista la prueba con datos. Lo que son promesas sin extractos se deja así, como promesas. Ejemplo: de decenas de videos de un canal de trading, la mayoría eran noticias o marketing sin reglas comprobables. Lo que sí quedó fueron unas pocas ideas concretas, como filtrar por tendencia en 4H y diario, probar un ADX más bajo y comparar formas de salida. Todas están pendientes de prueba, y ninguna se presenta como ventaja. La fórmula de InsaneScalp no es pública, así que cualquier prueba usa un proxy declarado como tal.
+
+**Analista Cuantitativo y de Riesgo.** Es el filtro entre las ideas y el bot. Cada hipótesis se registra por escrito antes de probarla, con costos reales, resultados en R, intervalos de confianza por bloques semanales, muestra fuera de muestra y corrección por comparaciones múltiples. Si hay menos de 100 trades fuera de muestra, el veredicto es "no concluyente". Ejemplo: en la variante 18 de CB (9 criptos, velas de 4h, 1,092 trades) el resultado fue −0.005R con intervalo [−0.083, +0.077], sobre unos 2.9 años (de nov-2023 a sep-2026), es decir, un solo régimen de mercado. El intervalo del último 30% es aún más ancho, [−0.188, +0.156]. No hay ventaja demostrada, y se publicó así. También se corrigió un error de método del propio equipo: una comparación entre variantes que debía hacerse en pares. *(Son velas spot de OKX, no ejecución real.)*
+
+**Ingeniero Pine Script (CB Swing Pro).** Audita y corrige el código Pine de v14/v15; todo por PR. Ejemplos reales, ya hechos: la auditoría encontró fallos en el filtro diario y en los stops; el PR #6 corrige el desfase del filtro diario y ancla stop y objetivos a la vela de señal. Medido en pares: el arreglo del stop suma +0.019R, IC [−0.003, +0.042], p≈0.10: ayuda un poco, no crea ventaja. Regla: no se tocan parámetros sin hipótesis escrita antes.
+
+**Ingeniero del Bot Vanta.** Mantiene un bot de señales que publica planes de trading en papel y nunca opera: la ejecución está desarmada por diseño. Todo cambio entra por pull request y solo después de que el Analista lo valide y seguridad lo revise. Ejemplo: bajar el riesgo por trade de 0.25% a 0.1% porque, según una estimación a partir de la simulación del Analista, con 0.25% el peor caso probable superaba el límite de pérdida de la evaluación.
+
+**Guardián de Seguridad.** Revisa cada pull request antes de que el dueño lo apruebe y vigila los accesos del proyecto. Su regla central es que ningún agente opera, mergea ni toca cuentas reales, y que ningún secreto entra al repositorio. Ejemplo: en una tienda web del mismo equipo, una revisión de seguridad bloqueó un cambio hasta que se cerró un riesgo en cómo se verificaban las conexiones a la base de datos.
+
+### 🎓 Cómo seguir el proyecto y aprender del método
+
+Lo valioso aquí no es una promesa, es el método. Si quieres hacerlo mejor que nosotros:
+
+1. **Escribe la hipótesis antes de probarla.**
+2. **Usa costos reales** (comisiones y *slippage*).
+3. **Reporta intervalos de confianza**, no solo el promedio.
+4. **Guarda una muestra fuera de muestra** y no la toques mientras ajustas.
+5. **No sobreajustes:** si el resultado no es concluyente, dilo así.
+
+Sigue el proyecto en los *pull requests* y en la carpeta de auditorías (`docs/audits`). Las cifras de arriba no son una promesa de resultados futuros.
